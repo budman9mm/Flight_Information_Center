@@ -15,7 +15,7 @@ bool InitializeWinsock() {
     if (result != 0) {
         MessageBoxA(NULL, ("Winsock init failed: " + std::to_string(result)).c_str(), "Error", MB_OK | MB_ICONERROR);
         return false;
-    }
+}
     return true;
 }
 
@@ -43,9 +43,9 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
         int error = WSAGetLastError();
         if (error != WSAEWOULDBLOCK) {
             MessageBoxA(hwndDlg, ("Connection to " + std::string(ip) + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
-            closesocket(g_socket);
-            return false;
-        }
+        closesocket(g_socket);
+        return false;
+    }
     }
     MessageBoxA(hwndDlg, (std::string("Connected to ") + ip + ":" + std::to_string(port)).c_str(), "Info", MB_OK);
     return true;
@@ -103,27 +103,28 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
         buffer.pop_back();
 
         std::stringstream ss(dataStart);
-        std::string token;
+    std::string token;
         int i = 0, j = 0;
-        while (std::getline(ss, token, '|') && i < 24) {
-            if (token.empty()) continue;
-            int charVal, color, attr;
-            if (sscanf_s(token.c_str(), "%d,%d,%d", &charVal, &color, &attr) == 3) {
+    while (std::getline(ss, token, '|') && i < 24) {
+        if (token.empty()) continue;
+        int charVal, color, attr;
+        if (sscanf_s(token.c_str(), "%d,%d,%d", &charVal, &color, &attr) == 3) {
                 g_package[i][j][0] = charVal;
                 g_package[i][j][1] = color;
                 g_package[i][j][2] = attr;
-                j++;
-                if (j >= 14) {
-                    j = 0;
-                    i++;
-                }
+            j++;
+            if (j >= 14) {
+                j = 0;
+                i++;
             }
+        }
             else {
                 SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Invalid token: " + token).c_str());
                 buffer.clear();
                 break;
-            }
-        }
+    }
+    return i == 24;
+}
         if (i != 24 || j != 0) {
             SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Incomplete data: parsed " + std::to_string(i) + " rows, " + std::to_string(j) + " cols").c_str());
             buffer.clear();
@@ -185,7 +186,7 @@ void LogDebugMessage(HWND hwndDlg, const std::string& message) {
     else {
         MessageBoxA(hwndDlg, ("Debug text control not found: " + message).c_str(), "Error", MB_OK | MB_ICONERROR);
     }
-}
+        }
 
 void DisconnectSocket(HWND hwndDlg) {
     if (g_socket != INVALID_SOCKET) {
@@ -194,6 +195,7 @@ void DisconnectSocket(HWND hwndDlg) {
         g_socket = INVALID_SOCKET;
         SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Socket disconnected");
     }
+    SetDlgItemTextA(hwndDlg, IDC_CDU_BUTTON, (g_cduIndex == 0) ? "Switch to CDU1" : (g_cduIndex == 1) ? "Switch to CDU2" : "Switch to CDU0");
 }
 
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -217,10 +219,17 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Failed to create receive thread");
             }
         }
+        // Create switch button
+        CreateWindowA("BUTTON", "Switch to CDU1", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            20, 500, 100, 30, hwndDlg, (HMENU)IDC_CDU_BUTTON, NULL, NULL);
+        // Start receiving data
+        SendCDUIndex(g_socket, g_cduIndex);
+        SetTimer(hwndDlg, 1, 100, NULL); // Update every 100ms
         return TRUE;
     }
     case WM_USER + 1:
-        UpdateCDUDisplay(hwndDlg, g_package);
+            UpdateCDUDisplay(hwndDlg, g_package);
+        }
         return TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_CDU_BUTTON) {
