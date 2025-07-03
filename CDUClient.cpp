@@ -6,23 +6,30 @@
 SOCKET g_socket = INVALID_SOCKET;
 int g_cduIndex = 0;
 int g_package[24][14][3] = { {{0}} };
+HANDLE g_thread = NULL;
+volatile bool g_running = false;
 
 bool InitializeWinsock() {
     WSADATA wsaData;
-    return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
+    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (result != 0) {
+        MessageBoxA(NULL, ("Winsock init failed: " + std::to_string(result)).c_str(), "Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    return true;
 }
 
 bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     g_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (g_socket == INVALID_SOCKET) {
-        LogDebugMessage(hwndDlg, "Socket creation failed: " + std::to_string(WSAGetLastError()));
+        MessageBoxA(hwndDlg, ("Socket creation failed: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
     // Set socket to non-blocking
     u_long mode = 1;
     if (ioctlsocket(g_socket, FIONBIO, &mode) != 0) {
-        LogDebugMessage(hwndDlg, "Failed to set non-blocking mode: " + std::to_string(WSAGetLastError()));
+        MessageBoxA(hwndDlg, ("Failed to set non-blocking mode: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
         closesocket(g_socket);
         return false;
     }
@@ -35,112 +42,149 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     if (connect(g_socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         int error = WSAGetLastError();
         if (error != WSAEWOULDBLOCK) {
-            LogDebugMessage(hwndDlg, "Connection to " + std::string(ip) + ":" + std::to_string(port) + " failed: " + std::to_string(error));
+            MessageBoxA(hwndDlg, ("Connection to " + std::string(ip) + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
             closesocket(g_socket);
             return false;
         }
     }
-    LogDebugMessage(hwndDlg, "Connected to " + std::string(ip) + ":" + std::to_string(port));
+    MessageBoxA(hwndDlg, (std::string("Connected to ") + ip + ":" + std::to_string(port)).c_str(), "Info", MB_OK);
     return true;
 }
 
-bool ReceiveCDUData(SOCKET sock, int package[24][14][3], HWND hwndDlg) {
-    char buffer[4096];
-    int bytesReceived = recv(sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytesReceived == SOCKET_ERROR) {
-        int error = WSAGetLastError();
-        if (error == WSAEWOULDBLOCK) {
-            return false; // No data available yet
-        }
-        LogDebugMessage(hwndDlg, "Receive failed: Error " + std::to_string(error));
-        return false;
-    }
-    if (bytesReceived == 0) {
-        LogDebugMessage(hwndDlg, "Connection closed by server");
-        return false;
-    }
-    if (bytesReceived != 1012) {
-        LogDebugMessage(hwndDlg, "Unexpected data size: " + std::to_string(bytesReceived) + " bytes (expected 1012)");
-        return false;
-    }
-    buffer[bytesReceived] = '\0';
-    std::string logMessage = "Received " + std::to_string(bytesReceived) + " bytes: ";
-    logMessage += std::string(buffer, std::min<size_t>(100, bytesReceived));
-    LogDebugMessage(hwndDlg, logMessage);
-
-    // Skip #X prefix and check \n
-    char* dataStart = buffer;
-    if (bytesReceived >= 2 && buffer[0] == '#' && (buffer[1] >= '0' && buffer[1] <= '2')) {
-        dataStart += 2;
-        LogDebugMessage(hwndDlg, "Skipped prefix: #" + std::string(1, buffer[1]));
-    }
-    else {
-        LogDebugMessage(hwndDlg, "No valid #X prefix found");
-        return false;
-    }
-
-    // Check and skip trailing \n
-    if (buffer[bytesReceived - 1] != '\n') {
-        LogDebugMessage(hwndDlg, "No trailing newline found");
-        return false;
-    }
-    bytesReceived--; // Exclude \n
-
-    std::stringstream ss(dataStart);
-    std::string token;
-    int i = 0, j = 0;
-    while (std::getline(ss, token, '|') && i < 24) {
-        if (token.empty()) continue;
-        int charVal, color, attr;
-        if (sscanf_s(token.c_str(), "%d,%d,%d", &charVal, &color, &attr) == 3) {
-            package[i][j][0] = charVal;
-            package[i][j][1] = color;
-            package[i][j][2] = attr;
-            j++;
-            if (j >= 14) {
-                j = 0;
-                i++;
+DWORD WINAPI ReceiveThread(LPVOID lpParam) {
+    HWND hwndDlg = (HWND)lpParam;
+    std::string buffer;
+    char tempBuffer[4096];
+    while (g_running && g_socket != INVALID_SOCKET) {
+        int bytesReceived = recv(g_socket, tempBuffer, sizeof(tempBuffer) - 1, 0);
+        if (bytesReceived == SOCKET_ERROR) {
+            int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) {
+                Sleep(100); // Brief pause to avoid CPU spin
+                continue;
             }
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Receive failed: Error " + std::to_string(error)).c_str());
+            break;
+        }
+        if (bytesReceived == 0) {
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Connection closed by server");
+            break;
+        }
+        tempBuffer[bytesReceived] = '\0';
+        buffer += tempBuffer;
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size())).c_str());
+
+        // Log raw data
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size()))).c_str());
+
+        // Need at least 1012 bytes
+        if (buffer.size() < 1012) {
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Waiting for more data: " + std::to_string(buffer.size()) + " bytes").c_str());
+            continue;
+        }
+
+        // Check #X prefix
+        char* dataStart = &buffer[0];
+        if (buffer.size() >= 2 && buffer[0] == '#' && (buffer[1] >= '0' && buffer[1] <= '2')) {
+            dataStart += 2;
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Skipped prefix: #" + std::string(1, buffer[1])).c_str());
         }
         else {
-            LogDebugMessage(hwndDlg, "Invalid token: " + token);
-            return false;
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("No valid #X prefix found: " + buffer.substr(0, std::min<size_t>(10, buffer.size()))).c_str());
+            buffer.clear();
+            continue;
         }
+
+        // Check trailing \n
+        if (buffer[buffer.size() - 1] != '\n') {
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "No trailing newline, waiting for more data");
+            continue;
+        }
+        buffer.pop_back();
+
+        std::stringstream ss(dataStart);
+        std::string token;
+        int i = 0, j = 0;
+        while (std::getline(ss, token, '|') && i < 24) {
+            if (token.empty()) continue;
+            int charVal, color, attr;
+            if (sscanf_s(token.c_str(), "%d,%d,%d", &charVal, &color, &attr) == 3) {
+                g_package[i][j][0] = charVal;
+                g_package[i][j][1] = color;
+                g_package[i][j][2] = attr;
+                j++;
+                if (j >= 14) {
+                    j = 0;
+                    i++;
+                }
+            }
+            else {
+                SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Invalid token: " + token).c_str());
+                buffer.clear();
+                break;
+            }
+        }
+        if (i != 24 || j != 0) {
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Incomplete data: parsed " + std::to_string(i) + " rows, " + std::to_string(j) + " cols").c_str());
+            buffer.clear();
+            continue;
+        }
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Parsed 336 elements successfully");
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Sample: [" + std::to_string(g_package[0][0][0]) + "," + std::to_string(g_package[0][0][1]) + "," + std::to_string(g_package[0][0][2]) + "]").c_str());
+        buffer.clear();
+        SendMessage(hwndDlg, WM_USER + 1, 0, 0); // Trigger display update
     }
-    if (i != 24 || j != 0) {
-        LogDebugMessage(hwndDlg, "Incomplete data: parsed " + std::to_string(i) + " rows, " + std::to_string(j) + " cols");
-        return false;
-    }
-    LogDebugMessage(hwndDlg, "Parsed " + std::to_string(i * 14) + " elements successfully");
-    return true;
+    return 0;
 }
 
 void SendCDUIndex(SOCKET sock, int cduIndex, HWND hwndDlg) {
     int bytesSent = send(sock, (char*)&cduIndex, sizeof(int), 0);
     if (bytesSent == SOCKET_ERROR) {
-        LogDebugMessage(hwndDlg, "Failed to send CDU index: " + std::to_string(WSAGetLastError()));
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Failed to send CDU index: " + std::to_string(WSAGetLastError())).c_str());
     }
     else if (bytesSent == sizeof(int)) {
-        LogDebugMessage(hwndDlg, "Sent CDU index: " + std::to_string(cduIndex));
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Sent CDU index: " + std::to_string(cduIndex)).c_str());
     }
 }
 
 void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
+    HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
+    if (!grid) {
+        MessageBoxA(hwndDlg, "Grid control not found", "Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    std::string displayText = "CDU Grid:\n";
     for (int i = 0; i < 24; i++) {
         for (int j = 0; j < 14; j++) {
-            int id = IDC_CDU_GRID + i * 14 + j;
-            char text[2] = { (char)package[i][j][0], '\0' };
-            SetDlgItemTextA(hwndDlg, id, text);
+            char c = (char)package[i][j][0];
+            displayText += (c >= 32 && c <= 126) ? c : ' ';
         }
+        displayText += "\n";
     }
-    SetDlgItemTextA(hwndDlg, IDC_CDU_BUTTON, (g_cduIndex == 0) ? "Switch to CDU1" : (g_cduIndex == 1) ? "Switch to CDU2" : "Switch to CDU0");
+    SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, displayText.c_str());
+    InvalidateRect(grid, NULL, TRUE);
+    UpdateWindow(grid);
+    SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Grid updated with " + std::to_string(displayText.size()) + " chars").c_str());
+    if (package[0][0][0] == 0) {
+        std::string testText = "Test Grid:\n";
+        for (int i = 0; i < 24; i++) {
+            testText += std::string(14, 'X') + "\n";
+        }
+        SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, testText.c_str());
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "No data parsed, showing test grid");
+    }
 }
 
 void LogDebugMessage(HWND hwndDlg, const std::string& message) {
-    static std::string log;
-    log = message + "\n" + log;
-    if (log.size() > 1000) log = log.substr(0, 1000);
-    SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, log.c_str());
+    HWND debugText = GetDlgItem(hwndDlg, IDC_DEBUG_TEXT);
+    if (debugText) {
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, message.c_str());
+        InvalidateRect(debugText, NULL, TRUE);
+        UpdateWindow(debugText);
+    }
+    else {
+        MessageBoxA(hwndDlg, ("Debug text control not found: " + message).c_str(), "Error", MB_OK | MB_ICONERROR);
+    }
 }
 
 void DisconnectSocket(HWND hwndDlg) {
@@ -148,39 +192,35 @@ void DisconnectSocket(HWND hwndDlg) {
         shutdown(g_socket, SD_BOTH);
         closesocket(g_socket);
         g_socket = INVALID_SOCKET;
-        LogDebugMessage(hwndDlg, "Socket disconnected");
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Socket disconnected");
     }
 }
 
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_INITDIALOG: {
-        // Create 24x14 grid of static text controls
-        for (int i = 0; i < 24; i++) {
-            for (int j = 0; j < 14; j++) {
-                CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_CENTER,
-                    20 + j * 20, 20 + i * 20, 20, 20, hwndDlg, (HMENU)(IDC_CDU_GRID + i * 14 + j), NULL, NULL);
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Dialog initialized");
+        InvalidateRect(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), NULL, TRUE);
+        UpdateWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT));
+        HWND debugText = GetDlgItem(hwndDlg, IDC_DEBUG_TEXT);
+        HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Debug text control: " + std::string(debugText ? "Created" : "Not found")).c_str());
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Grid control: " + std::string(grid ? "Created" : "Not found")).c_str());
+        SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid");
+        InvalidateRect(hwndDlg, NULL, TRUE);
+        UpdateWindow(hwndDlg);
+        if (ConnectToServer("192.168.1.5", 27016, hwndDlg)) {
+            SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
+            g_running = true;
+            g_thread = CreateThread(NULL, 0, ReceiveThread, hwndDlg, 0, NULL);
+            if (!g_thread) {
+                SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Failed to create receive thread");
             }
         }
-        // Create switch button
-        CreateWindowA("BUTTON", "Switch to CDU1", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            20, 500, 100, 30, hwndDlg, (HMENU)IDC_CDU_BUTTON, NULL, NULL);
-        // Create disconnect button
-        CreateWindowA("BUTTON", "Disconnect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            130, 500, 100, 30, hwndDlg, (HMENU)IDC_DISCONNECT_BUTTON, NULL, NULL);
-        // Create debug text area
-        CreateWindowA("EDIT", "", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
-            20, 540, 300, 100, hwndDlg, (HMENU)IDC_DEBUG_TEXT, NULL, NULL);
-        // Start receiving data
-        ConnectToServer("192.168.1.5", 27016, hwndDlg);
-        SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
-        SetTimer(hwndDlg, 1, 100, NULL);
         return TRUE;
     }
-    case WM_TIMER:
-        if (g_socket != INVALID_SOCKET && ReceiveCDUData(g_socket, g_package, hwndDlg)) {
-            UpdateCDUDisplay(hwndDlg, g_package);
-        }
+    case WM_USER + 1:
+        UpdateCDUDisplay(hwndDlg, g_package);
         return TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_CDU_BUTTON) {
@@ -189,12 +229,29 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             UpdateCDUDisplay(hwndDlg, g_package);
         }
         else if (LOWORD(wParam) == IDC_DISCONNECT_BUTTON) {
+            g_running = false;
             DisconnectSocket(hwndDlg);
-            KillTimer(hwndDlg, 1); // Stop updates
+        }
+        else if (LOWORD(wParam) == IDC_EXIT_BUTTON) {
+            g_running = false;
+            DisconnectSocket(hwndDlg);
+            if (g_thread) {
+                WaitForSingleObject(g_thread, 1000);
+                CloseHandle(g_thread);
+                g_thread = NULL;
+            }
+            WSACleanup();
+            EndDialog(hwndDlg, 0);
         }
         return TRUE;
     case WM_CLOSE:
+        g_running = false;
         DisconnectSocket(hwndDlg);
+        if (g_thread) {
+            WaitForSingleObject(g_thread, 1000);
+            CloseHandle(g_thread);
+            g_thread = NULL;
+        }
         WSACleanup();
         EndDialog(hwndDlg, 0);
         return TRUE;
@@ -207,6 +264,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         MessageBoxA(NULL, "Winsock initialization failed", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
+    MessageBoxA(NULL, "Starting client", "Debug", MB_OK);
     DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);
     return 0;
 }

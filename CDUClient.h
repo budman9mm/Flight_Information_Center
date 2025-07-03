@@ -14,6 +14,7 @@
 #define IDC_CDU_BUTTON 2000
 #define IDC_DEBUG_TEXT 2001
 #define IDC_DISCONNECT_BUTTON 2002
+#define IDC_EXIT_BUTTON 2003
 
 // Global variables
 extern SOCKET g_socket;
