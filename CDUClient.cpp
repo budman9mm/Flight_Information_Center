@@ -8,6 +8,7 @@ int g_cduIndex = 0;
 int g_package[24][14][3] = { {{0}} };
 HANDLE g_thread = NULL;
 volatile bool g_running = false;
+HFONT g_hFont = NULL;
 
 bool InitializeWinsock() {
     WSADATA wsaData;
@@ -26,7 +27,6 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
         return false;
     }
 
-    // Set socket to non-blocking
     u_long mode = 1;
     if (ioctlsocket(g_socket, FIONBIO, &mode) != 0) {
         MessageBoxA(hwndDlg, ("Failed to set non-blocking mode: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
@@ -42,12 +42,22 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     if (connect(g_socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         int error = WSAGetLastError();
         if (error != WSAEWOULDBLOCK) {
-            MessageBoxA(hwndDlg, ("Connection to " + std::string(ip) + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
+            MessageBoxA(hwndDlg, (std::string("Connection to ") + ip + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
+            closesocket(g_socket);
+            return false;
+        }
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(g_socket, &writeSet);
+        struct timeval timeout = { 2, 0 };
+        if (select(0, NULL, &writeSet, NULL, &timeout) <= 0) {
+            MessageBoxA(hwndDlg, "Connection timed out", "Error", MB_OK | MB_ICONERROR);
             closesocket(g_socket);
             return false;
         }
     }
     MessageBoxA(hwndDlg, (std::string("Connected to ") + ip + ":" + std::to_string(port)).c_str(), "Info", MB_OK);
+    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Connected to " + std::string(ip) + ":" + std::to_string(port))));
     return true;
 }
 
@@ -55,126 +65,76 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
     HWND hwndDlg = (HWND)lpParam;
     std::string buffer;
     char tempBuffer[4096];
-
-	// Attempt to create Futura Md BT font, fallback to Arial if not available
-    HFONT hFont = CreateFont(10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Futura Md BT");
-    if (!hFont) {
-        hFont = CreateFont(10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
-    }
-   
     while (g_running && g_socket != INVALID_SOCKET) {
         int bytesReceived = recv(g_socket, tempBuffer, sizeof(tempBuffer) - 1, 0);
         if (bytesReceived == SOCKET_ERROR) {
             int error = WSAGetLastError();
             if (error == WSAEWOULDBLOCK) {
-                Sleep(100); // Brief pause to avoid CPU spin
+                Sleep(100);
                 continue;
             }
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Receive failed: Error " + std::to_string(error)).c_str());
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Receive failed: Error " + std::to_string(error))));
             break;
         }
-        if (bytesReceived <= 0) {
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Connection closed by server");
+        if (bytesReceived == 0) {
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Connection closed by server")));
             break;
         }
         tempBuffer[bytesReceived] = '\0';
         buffer += tempBuffer;
-        SetDlgItemTextA(hwndDlg, IDC_RAW_DATA, buffer.c_str());
-        // After updating the IDC_RAW_DATA edit control
-        HWND hEdit = GetDlgItem(hwndDlg, IDC_RAW_DATA);
-        // Get the length of the text
-        int textLength = GetWindowTextLength(hEdit);
-		// Set the text in the edit control
-        SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
-        // Set the selection to the end
-        SendMessage(hEdit, EM_SETSEL, (WPARAM)textLength, (LPARAM)textLength);
-        // Scroll caret into view
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
-        
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size()))));
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size())))));
+        SendMessage(GetDlgItem(hwndDlg, IDC_RAW_DATA), WM_SETTEXT, 0, (LPARAM)buffer.c_str());
 
-        //SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size())).c_str());
-        std::string debugStr = "Received " + std::to_string(bytesReceived) +
-            " bytes, total buffered: " + std::to_string(buffer.size());
-        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, debugStr.c_str());
-
-        // Log raw data
-        SetDlgItemText(hwndDlg, IDC_DEBUG_TEXT, ("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size()))).c_str());
-
-        // Need at least 1012 bytes
         if (buffer.size() < 1012) {
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Waiting for more data: " + std::to_string(buffer.size()) + " bytes").c_str());
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Waiting for more data: " + std::to_string(bytesReceived) + " bytes")));
             continue;
         }
 
-        // Check #X prefix
-        char* dataStart = &buffer[0];
-        if (buffer.size() >= 2 && buffer[0] == '#' && (buffer[1] >= '0' && buffer[1] <= '2')) {
-			OutputDebugStringA(buffer.c_str()); // Log raw data
-            if (buffer[1] != ('0' + g_cduIndex)) {
-                buffer.clear(); // Ignore mismatched CDU data
-                continue;
-            }
-            dataStart += 2;
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Skipped prefix: #" + std::string(1, buffer[1])).c_str());
+        if (buffer.size() >= 2 && buffer[0] == '#' && buffer[1] == 'X') {
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Skipped prefix: #" + std::string(1, buffer[1]))));
         }
         else {
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("No valid #X prefix found: " + buffer.substr(0, std::min<size_t>(10, buffer.size()))).c_str());
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("No valid #X prefix found: " + buffer.substr(0, std::min<size_t>(10, buffer.size())))));
             buffer.clear();
             continue;
         }
 
-        // Check trailing \n
-        if (buffer[buffer.size() - 1] != '\n') {
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "No trailing newline, waiting for more data");
+       if (buffer.size() < 338) {
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Insufficient data for text: " + std::to_string(buffer.size()) + " bytes")));
             continue;
         }
-        buffer.pop_back();
 
-        std::stringstream ss(dataStart);
-        std::string token;
-        int i = 0, j = 0;
-        while (std::getline(ss, token, '|') && i < 24) {
-            if (token.empty()) continue;
-            int charVal, color, attr;
-            if (sscanf_s(token.c_str(), "%d,%d,%d", &charVal, &color, &attr) == 3) {
-                g_package[i][j][0] = charVal;
-                g_package[i][j][1] = color;
-                g_package[i][j][2] = attr;
-                j++;
-                if (j >= 14) {
-                    j = 0;
-                    i++;
-                }
-            }
-            else {
-                SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Invalid token: " + token).c_str());
-                buffer.clear();
-                break;
+        std::string textData = buffer.substr(2, 1008);
+        for (int i = 0; i < 14; i++) {
+            for (int j = 0; j < 24; j++) {
+                int idx = i * 14 + j;
+                g_package[i][j][0] = (unsigned char)textData[idx];
+                g_package[i][j][1] = 0;
+                g_package[i][j][2] = 0;
             }
         }
-        if (i != 24 || j != 0) {
-            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Incomplete data: parsed " + std::to_string(i) + " rows, " + std::to_string(j) + " cols").c_str());
-            buffer.clear();
-            continue;
-        }
-        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Parsed 336 elements successfully");
-        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Sample: [" + std::to_string(g_package[0][0][0]) + "," + std::to_string(g_package[0][0][1]) + "," + std::to_string(g_package[0][0][2]) + "]").c_str());
+        //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Parsed 336 text bytes")));
+        //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sample: [" + std::to_string(g_package[0][0][0]) + "]")));
         buffer.clear();
-        SendMessage(hwndDlg, WM_USER + 1, 0, 0); // Trigger display update
+        PostMessage(hwndDlg, WM_USER + 1, 0, 0);
+    }
+    if (g_hFont) {
+        DeleteObject(g_hFont);
+        g_hFont = NULL;
     }
     return 0;
 }
 
 void SendCDUIndex(SOCKET sock, int cduIndex, HWND hwndDlg) {
     std::string message = "SET CDU " + std::to_string(cduIndex);
-    send(sock, message.c_str(), static_cast<int>(message.size()), 0);
-    // Optional: Use MessageBox or OutputDebugString if you want confirmation during dev
-    MessageBox(hwndDlg, message.c_str(), "Sent CDU Index", MB_OK);
-    OutputDebugStringA(message.c_str());
+    int bytesSent = send(sock, message.c_str(), static_cast<int>(message.size()), 0);
+    if (bytesSent == SOCKET_ERROR) {
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Failed to send CDU index: " + std::to_string(WSAGetLastError()))));
+    }
+    else {
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sent CDU index: " + std::to_string(cduIndex))));
+    }
 }
 
 void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
@@ -183,25 +143,26 @@ void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
         MessageBoxA(hwndDlg, "Grid control not found", "Error", MB_OK | MB_ICONERROR);
         return;
     }
-    std::string displayText = "CDU Grid:\n";
-    for (int i = 0; i < 24; i++) {
-        for (int j = 0; j < 14; j++) {
+    std::string displayText;
+    for (int i = 0; i < 14; i++) {
+        for (int j = 0; j < 24; j++) {
             char c = (char)package[i][j][0];
-            displayText += (c >= 32 && c <= 126) ? c : ' ';
+            //displayText += (c >= 32 && c <= 126) ? c : ' ';
+			displayText += c; // Directly append the character
         }
-        displayText += "\n";
+        displayText += "\r\n";
     }
     SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, displayText.c_str());
     InvalidateRect(grid, NULL, TRUE);
     UpdateWindow(grid);
-    SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Grid updated with " + std::to_string(displayText.size()) + " chars").c_str());
+    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Grid updated with " + std::to_string(displayText.size()) + " chars")));
     if (package[0][0][0] == 0) {
-        std::string testText = "Test Grid:\n";
+        std::string testText = "Test Grid:\r\n";
         for (int i = 0; i < 24; i++) {
-            testText += std::string(24, 'X') + "\n";
+            testText += std::string(24, 'X') + "\r\n";
         }
         SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, testText.c_str());
-        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "No data parsed, showing test grid");
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("No data parsed, showing test grid")));
     }
 }
 
@@ -222,20 +183,34 @@ void DisconnectSocket(HWND hwndDlg) {
         shutdown(g_socket, SD_BOTH);
         closesocket(g_socket);
         g_socket = INVALID_SOCKET;
-        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Socket disconnected");
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Socket disconnected")));
     }
 }
 
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_INITDIALOG: {
+        g_hFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Futura Md BT");
+        if (!g_hFont) {
+            g_hFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
+        }
+        SendMessage(GetDlgItem(hwndDlg, IDC_CDU_GRID), WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        SendMessage(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        SendMessage(GetDlgItem(hwndDlg, IDC_RAW_DATA), WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
         SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, "Dialog initialized");
         InvalidateRect(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), NULL, TRUE);
         UpdateWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT));
         HWND debugText = GetDlgItem(hwndDlg, IDC_DEBUG_TEXT);
         HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
+        HWND rawData = GetDlgItem(hwndDlg, IDC_RAW_DATA);
         SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Debug text control: " + std::string(debugText ? "Created" : "Not found")).c_str());
         SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Grid control: " + std::string(grid ? "Created" : "Not found")).c_str());
+        SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, ("Raw data control: " + std::string(rawData ? "Created" : "Not found")).c_str());
         SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid");
         InvalidateRect(hwndDlg, NULL, TRUE);
         UpdateWindow(hwndDlg);
@@ -252,44 +227,38 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     case WM_SIZE: {
         int dlgWidth = LOWORD(lParam);
         int dlgHeight = HIWORD(lParam);
-
-        // Margins and layout constants
-        int left = 20, top = 20, right = 20, bottom = 140;
+        int left = 20, top = 245, right = 20, bottom = 80;
         int gridRows = 24, gridCols = 14;
-
-        // Calculate available width/height for the grid
         int gridWidth = dlgWidth - left - right;
         int gridHeight = dlgHeight - top - bottom;
-
-        // Calculate cell size
         int cellWidth = gridWidth / gridCols;
         int cellHeight = gridHeight / gridRows;
-
-        // Resize and reposition each grid cell
-        for (int i = 0; i < gridRows; ++i) {
-            for (int j = 0; j < gridCols; ++j) {
-                int id = IDC_CDU_GRID + i * gridCols + j;
-                int x = left + j * cellWidth;
-                int y = top + i * cellHeight;
-                MoveWindow(GetDlgItem(hwndDlg, id), x, y, cellWidth, cellHeight, TRUE);
-            }
-        }
-
-        // Move buttons to the bottom
-        MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_BUTTON), 20, dlgHeight - 110, 100, 30, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_DISCONNECT_BUTTON), 130, dlgHeight - 110, 100, 30, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_EXIT_BUTTON), 240, dlgHeight - 110, 80, 30, TRUE);
-
-        // Resize/move debug text area
-        MoveWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), 10, dlgHeight - 70, dlgWidth - 20, 60, TRUE);
-
-        // Resize/move raw data area
-        MoveWindow(GetDlgItem(hwndDlg, IDC_RAW_DATA), dlgWidth - 210, 10, 200, 100, TRUE);
-
+        MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_GRID), left, top, gridWidth, gridHeight, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_BUTTON), 20, dlgHeight - 70, 100, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_DISCONNECT_BUTTON), 130, dlgHeight - 70, 100, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_EXIT_BUTTON), 240, dlgHeight - 70, 70, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), 10, 150, 200, 45, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_RAW_DATA), 10, 10, 200, 100, TRUE);
         return TRUE;
     }
     case WM_USER + 1:
         UpdateCDUDisplay(hwndDlg, g_package);
+        return TRUE;
+    case WM_USER + 2: {
+        std::string* msg = (std::string*)lParam;
+        if (msg) {
+            SetDlgItemTextA(hwndDlg, IDC_DEBUG_TEXT, msg->c_str());
+            InvalidateRect(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), NULL, TRUE);
+            UpdateWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT));
+            delete msg;
+        }
+        return TRUE;
+    }
+    case WM_DESTROY:
+        if (g_hFont) {
+            DeleteObject(g_hFont);
+            g_hFont = NULL;
+        }
         return TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_CDU_BUTTON) {
@@ -328,15 +297,12 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     return FALSE;
 }
 
-#include <windows.h>  
-#include <sal.h>  
-
-int WINAPI _In_ WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {  
-    if (!InitializeWinsock()) {  
-        MessageBoxA(NULL, "Winsock initialization failed", "Error", MB_OK | MB_ICONERROR);  
-        return 1;  
-    }  
-    MessageBoxA(NULL, "Starting client", "Debug", MB_OK);  
-    DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);  
-    return 0;  
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    if (!InitializeWinsock()) {
+        MessageBoxA(NULL, "Winsock initialization failed", "Error", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    MessageBoxA(NULL, "Starting client", "Debug", MB_OK);
+    DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);
+    return 0;
 }
