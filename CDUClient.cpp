@@ -9,8 +9,10 @@ int g_cduIndex = 0;
 int g_package[24][14][3] = { {{0}} };
 HANDLE g_thread = NULL;
 volatile bool g_running = false;
-HFONT g_hFont = NULL;
-bool g_console = true; // Console debugging flag
+HFONT g_hFontGrid = NULL;
+HFONT g_hFontDebug = NULL;
+bool g_console = false; // Console debugging flag -- Turn on for console output
+bool g_connected = false;
 
 bool InitializeWinsock() {
     WSADATA wsaData;
@@ -66,6 +68,8 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     if (g_console) printf_s("Connected to %s:%d\n", ip, port);
     MessageBoxA(hwndDlg, (std::string("Connected to ") + ip + ":" + std::to_string(port)).c_str(), "Info", MB_OK);
     PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Connected to " + std::string(ip) + ":" + std::to_string(port) + "\r\n")));
+    g_connected = true;
+    SetDlgItemTextA(hwndDlg, IDC_DISCONNECT_BUTTON, "Disconnect");
     return true;
 }
 
@@ -96,10 +100,10 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size()) + "\r\n")));
         if (g_console) printf_s("Raw data: %.*s\n", (int)std::min<size_t>(100, buffer.size()), buffer.c_str());
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size())) + "\r\n")));
-        SendMessage(GetDlgItem(hwndDlg, IDC_RAW_DATA), WM_SETTEXT, 0, (LPARAM)buffer.c_str());
+      
 
         if (buffer.size() < 1010) {
-            if (g_console) printf_s("Waiting for more data: %zu bytes\n", buffer.size());
+            if (g_console) printf_s("Incomplete data received(1010): %zu bytes\n", buffer.size());
             PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Waiting for more data: " + std::to_string(buffer.size()) + " bytes\r\n")));
             continue;
         }
@@ -147,9 +151,13 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
         buffer.clear();
         PostMessage(hwndDlg, WM_USER + 1, 0, 0);
     }
-    if (g_hFont) {
-        DeleteObject(g_hFont);
-        g_hFont = NULL;
+    if (g_hFontGrid) {
+        DeleteObject(g_hFontGrid);
+        g_hFontGrid = NULL;
+    }
+    if (g_hFontDebug) {
+        DeleteObject(g_hFontDebug);
+        g_hFontDebug = NULL;
     }
     if (g_console) {
         FreeConsole();
@@ -181,7 +189,11 @@ void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
     for (int i = 0; i < 14; ++i) {
         for (int j = 0; j < 24; ++j) {
             char c = (char)package[j][i][0];
-            displayText += (c >= 32 && c <= 126) ? c : ' ';
+            //if (c == 136) c = 219; //Box
+            //if (c == 173) c = 174; //Switch to <<
+            //if (c == 155) c = 175;
+			//if (c < 32 || c > 126) c = '.'; // Replace non-printable characters with '.'
+            displayText += c;
         }
         displayText += "\r\n";
     }
@@ -190,15 +202,7 @@ void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
     UpdateWindow(grid);
     if (g_console) printf_s("Grid updated with %zu chars\n", displayText.size());
     PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Grid updated with " + std::to_string(displayText.size()) + " chars\r\n")));
-    if (package[0][0][0] == 0) {
-        std::string testText = "Test Grid:\r\n";
-        for (int j = 0; j < 24; j++) {
-            testText += std::string(14, 'X') + "\r\n";
-        }
-        SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, testText.c_str());
-        if (g_console) printf_s("No data parsed, showing test grid\n");
-        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("No data parsed, showing test grid\r\n")));
-    }
+    
 }
 
 void LogDebugMessage(HWND hwndDlg, const std::string& message) {
@@ -222,8 +226,10 @@ void DisconnectSocket(HWND hwndDlg) {
         shutdown(g_socket, SD_BOTH);
         closesocket(g_socket);
         g_socket = INVALID_SOCKET;
+        g_connected = false;
         if (g_console) printf_s("Socket disconnected\n");
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Socket disconnected\r\n")));
+        SetDlgItemTextA(hwndDlg, IDC_DISCONNECT_BUTTON, "Connect");
     }
 }
 
@@ -235,28 +241,32 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             FILE* dummy;
             freopen_s(&dummy, "CONOUT$", "w", stdout);
         }
-        g_hFont = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        g_hFontGrid = CreateFont(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Cascadia Code");
-        if (!g_hFont) {
-            g_hFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        if (!g_hFontGrid) {
+            g_hFontGrid = CreateFont(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Courier New");
         }
-
-        SendMessage(GetDlgItem(hwndDlg, IDC_CDU_GRID), WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        SendMessage(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        SendMessage(GetDlgItem(hwndDlg, IDC_RAW_DATA), WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_hFontDebug = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Cascadia Code");
+        if (!g_hFontDebug) {
+            g_hFontDebug = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Courier New");
+        }
+        SendMessage(GetDlgItem(hwndDlg, IDC_CDU_GRID), WM_SETFONT, (WPARAM)g_hFontGrid, TRUE);
+        SendMessage(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), WM_SETFONT, (WPARAM)g_hFontDebug, TRUE);
 
         LogDebugMessage(hwndDlg, "Dialog initialized\r\n");
         InvalidateRect(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), NULL, TRUE);
         UpdateWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT));
         HWND debugText = GetDlgItem(hwndDlg, IDC_DEBUG_TEXT);
         HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
-        HWND rawData = GetDlgItem(hwndDlg, IDC_RAW_DATA);
         LogDebugMessage(hwndDlg, "Debug text control: " + std::string(debugText ? "Created" : "Not found") + "\r\n");
         LogDebugMessage(hwndDlg, "Grid control: " + std::string(grid ? "Created" : "Not found") + "\r\n");
-        LogDebugMessage(hwndDlg, "Raw data control: " + std::string(rawData ? "Created" : "Not found") + "\r\n");
         SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid\r\n");
         InvalidateRect(hwndDlg, NULL, TRUE);
         UpdateWindow(hwndDlg);
@@ -274,16 +284,15 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     case WM_SIZE: {
         int dlgWidth = LOWORD(lParam);
         int dlgHeight = HIWORD(lParam);
-        int left = 20, top = 245, right = 20, bottom = 80;
+        int left = 10, top = 10, right = 10, bottom = 80;
         int gridRows = 24, gridCols = 14;
         int gridWidth = dlgWidth - left - right;
-        int gridHeight = dlgHeight - top - bottom;
+        int gridHeight = 240;
         MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_GRID), left, top, gridWidth, gridHeight, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_BUTTON), 20, dlgHeight - 70, 100, 30, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_DISCONNECT_BUTTON), 130, dlgHeight - 70, 100, 30, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_EXIT_BUTTON), 240, dlgHeight - 70, 70, 30, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), 10, 150, 200, 45, TRUE);
-        MoveWindow(GetDlgItem(hwndDlg, IDC_RAW_DATA), 10, 10, 200, 100, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_CDU_BUTTON), 10, dlgHeight - 70, 100, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_DISCONNECT_BUTTON), 120, dlgHeight - 70, 100, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_EXIT_BUTTON), 230, dlgHeight - 70, 70, 30, TRUE);
+        MoveWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT), 10, dlgHeight - 140, 280, 60, TRUE);
         return TRUE;
     }
     case WM_USER + 1:
@@ -298,9 +307,13 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         return TRUE;
     }
     case WM_DESTROY:
-        if (g_hFont) {
-            DeleteObject(g_hFont);
-            g_hFont = NULL;
+        if (g_hFontGrid) {
+            DeleteObject(g_hFontGrid);
+            g_hFontGrid = NULL;
+        }
+        if (g_hFontDebug) {
+            DeleteObject(g_hFontDebug);
+            g_hFontDebug = NULL;
         }
         if (g_console) {
             FreeConsole();
@@ -309,12 +322,27 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_CDU_BUTTON) {
             g_cduIndex = (g_cduIndex + 1) % 3;
-            SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
+            if (g_connected) {
+                SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
+            }
             UpdateCDUDisplay(hwndDlg, g_package);
         }
         else if (LOWORD(wParam) == IDC_DISCONNECT_BUTTON) {
-            g_running = false;
-            DisconnectSocket(hwndDlg);
+            if (g_connected) {
+                g_running = false;
+                DisconnectSocket(hwndDlg);
+            }
+            else {
+                if (ConnectToServer("192.168.1.5", 27016, hwndDlg)) {
+                    SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
+                    g_running = true;
+                    g_thread = CreateThread(NULL, 0, ReceiveThread, hwndDlg, 0, NULL);
+                    if (!g_thread) {
+                        if (g_console) printf_s("Failed to create receive thread\n");
+                        LogDebugMessage(hwndDlg, "Failed to create receive thread\r\n");
+                    }
+                }
+            }
         }
         else if (LOWORD(wParam) == IDC_EXIT_BUTTON) {
             g_running = false;
