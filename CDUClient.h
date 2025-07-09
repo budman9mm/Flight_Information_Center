@@ -21,11 +21,12 @@ extern SOCKET g_socket;
 extern int g_cduIndex;
 extern int g_package[24][14][3];
 
+
 // Function declarations
 INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 bool InitializeWinsock();
 bool ConnectToServer(const char* ip, int port, HWND hwndDlg);
-bool ReceiveCDUData(SOCKET sock, int package[24][14][3], HWND hwndDlg);
+//bool ReceiveCDUData(SOCKET sock, int package[24][14][3], HWND hwndDlg);
 void SendCDUIndex(SOCKET sock, int cduIndex, HWND hwndDlg);
 void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]);
 void LogDebugMessage(HWND hwndDlg, const std::string& message);

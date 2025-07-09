@@ -14,6 +14,89 @@ HFONT g_hFontDebug = NULL;
 bool g_console = false; // Console debugging flag -- Turn on for console output
 bool g_connected = false;
 
+//PMDG annunciators
+bool CDU_annunEXEC, CDU_annunDSPY, CDU_annunFAIL, CDU_annunMSG, CDU_annunOFST;//L/R/C CDU annunciators
+bool CDU_annunEXEC_p, CDU_annunDSPY_p, CDU_annunFAIL_p, CDU_annunMSG_p, CDU_annunOFST_p;
+
+// Button command structure
+struct ButtonCommand {
+    UINT controlId;
+    int zcode;
+    const char* descrition;
+};
+const ButtonCommand cduButtons[] = {
+    {IDC_LSK1L, 69960, "EVT_CDU_L_L1"},
+	{IDC_LSK2L, 69961, "EVT_CDU_L_L2"},
+	{IDC_LSK3L, 69962, "EVT_CDU_L_L3"},
+	{IDC_LSK4L, 69963, "EVT_CDU_L_L4"},
+	{IDC_LSK5L, 69964, "EVT_CDU_L_L5"},
+	{IDC_LSK6L, 69965, "EVT_CDU_L_L6"},
+	{IDC_LSK1R, 69966, "EVT_CDU_L_R1"},
+	{IDC_LSK2R, 69967, "EVT_CDU_L_R2"},
+	{IDC_LSK3R, 69968, "EVT_CDU_L_R3"},
+	{IDC_LSK4R, 69969, "EVT_CDU_L_R4"},
+	{IDC_LSK5R, 69970, "EVT_CDU_L_R5"},
+	{IDC_LSK6R, 69971, "EVT_CDU_L_R6"},
+	{IDC_INIT_REF, 69972, "EVT_CDU_L_INIT_REF"},
+	{IDC_RTE, 69973, "EVT_CDU_L_RTE"},
+	{IDC_DEP_ARR, 69974, "EVT_CDU_L_DEP_ARR"},
+	{IDC_ALTN, 69975, "EVT_CDU_L_ALTN"},
+	{IDC_VNAV, 69976, "EVT_CDU_L_VNAV"},
+	{IDC_FIX, 69977, "EVT_CDU_L_FIX"},
+	{IDC_LEGS, 69978, "EVT_CDU_L_LEGS"},
+	{IDC_HOLD, 69979, "EVT_CDU_L_HOLD"},
+	{IDC_FMC_COMM, 73103, "EVT_CDU_L_FMC_COMM"},
+	{IDC_PROG, 69980, "EVT_CDU_L_PROG"},
+	{IDC_KEY_EXEC, 69981, "EVT_CDU_L_EXEC"},
+    {IDC_MENU, 69982, "EVT_CDU_L_MENU"},
+	{IDC_NAV_RAD, 69983, "EVT_CDU_L_NAV_RAD"},
+	{IDC_PREV_PAGE, 69984, "EVT_CDU_L_PREV_PAGE"},
+	{IDC_NEXT_PAGE, 69985, "EVT_CDU_L_NEXT_PAGE"},
+	{IDC_KEY_1, 69986, "EVT_CDU_L_1"},
+	{IDC_KEY_2, 69987, "EVT_CDU_L_2"},
+	{IDC_KEY_3, 69988, "EVT_CDU_L_3"},
+	{IDC_KEY_4, 69989, "EVT_CDU_L_4"},
+	{IDC_KEY_5, 69990, "EVT_CDU_L_5"},
+	{IDC_KEY_6, 69991, "EVT_CDU_L_6"},
+	{IDC_KEY_7, 69992, "EVT_CDU_L_7"},
+	{IDC_KEY_8, 69993, "EVT_CDU_L_8"},
+	{IDC_KEY_9, 69994, "EVT_CDU_L_9"},
+	{IDC_KEY_DOT, 69995, "EVT_CDU_L_DOT"},
+	{IDC_KEY_0, 69996, "EVT_CDU_L_0"},
+	{IDC_KEY_PLUS_MINUS, 69997, "EVT_CDU_L_PLUS_MINUS"},
+	{IDC_KEY_A, 69998, "EVT_CDU_L_A"},
+	{IDC_KEY_B, 69999, "EVT_CDU_L_B"},
+	{IDC_KEY_C, 70000, "EVT_CDU_L_C"},
+	{IDC_KEY_D, 70001, "EVT_CDU_L_D"},
+	{IDC_KEY_E, 70002, "EVT_CDU_L_E"},
+	{IDC_KEY_F, 70003, "EVT_CDU_L_F"},
+	{IDC_KEY_G, 70004, "EVT_CDU_L_G"},
+	{IDC_KEY_H, 70005, "EVT_CDU_L_H"},
+	{IDC_KEY_I, 70006, "EVT_CDU_L_I"},
+	{IDC_KEY_J, 70007, "EVT_CDU_L_J"},
+	{IDC_KEY_K, 70008, "EVT_CDU_L_K"},
+	{IDC_KEY_L, 70009, "EVT_CDU_L_L"},
+	{IDC_KEY_M, 70010, "EVT_CDU_L_M"},
+	{IDC_KEY_N, 70011, "EVT_CDU_L_N"},
+	{IDC_KEY_O, 70012, "EVT_CDU_L_O"},
+	{IDC_KEY_P, 70013, "EVT_CDU_L_P"},
+	{IDC_KEY_Q, 70014, "EVT_CDU_L_Q"},
+	{IDC_KEY_R, 70015, "EVT_CDU_L_R"},
+	{IDC_KEY_S, 70016, "EVT_CDU_L_S"},
+	{IDC_KEY_T, 70017, "EVT_CDU_L_T"},
+	{IDC_KEY_U, 70018, "EVT_CDU_L_U"},
+	{IDC_KEY_V, 70019, "EVT_CDU_L_V"},
+	{IDC_KEY_W, 70020, "EVT_CDU_L_W"},
+	{IDC_KEY_X, 70021, "EVT_CDU_L_X"},
+	{IDC_KEY_Y, 70022, "EVT_CDU_L_Y"},
+	{IDC_KEY_Z, 70023, "EVT_CDU_L_Z"},
+	{IDC_KEY_SP, 70024, "EVT_CDU_L_SPACE"},
+	{IDC_KEY_DEL, 70025, "EVT_CDU_L_DEL"},
+	{IDC_KEY_SLASH, 70026, "EVT_CDU_L_SLASH"},
+	{IDC_KEY_CLR, 70027, "EVT_CDU_L_CLR"},
+	//{IDC_KEY_BRITENESS, 70032, "EVT_CDU_L_BRIGHTNESS"},
+};
+
 bool InitializeWinsock() {
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -137,31 +220,23 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
         for (int h = 0; h < 3; h++) {
             for (int i = 0; i < 14; ++i) {
                 for (int j = 0; j < 24; ++j) {
-                    g_package[j][i][h] = (unsigned char)textData[idx];
-                    printf_s("%c", g_package[j][i][h]);
+                    g_package[j][i][h] = (char)textData[idx];
+                    if (g_console) {
+                        printf_s("%d", g_package[j][i][h]);
+					}       
                     idx++;
                 }
-                printf_s("\n");
+                 if (g_console) printf_s("\n");
             }
         }
-        if (g_console) printf_s("Parsed text bytes\n");
+        //if (g_console) printf_s("Parsed text bytes\n");
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Parsed 336 text bytes\r\n")));
         if (g_console) printf_s("Sample: [%d]\n", g_package[0][0][0]);
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sample: [" + std::to_string(g_package[0][0][0]) + "]\r\n")));
         buffer.clear();
         PostMessage(hwndDlg, WM_USER + 1, 0, 0);
     }
-    if (g_hFontGrid) {
-        DeleteObject(g_hFontGrid);
-        g_hFontGrid = NULL;
-    }
-    if (g_hFontDebug) {
-        DeleteObject(g_hFontDebug);
-        g_hFontDebug = NULL;
-    }
-    if (g_console) {
-        FreeConsole();
-    }
+    
     return 0;
 }
 
@@ -178,6 +253,20 @@ void SendCDUIndex(SOCKET sock, int cduIndex, HWND hwndDlg) {
     }
 }
 
+void SendCDUControl(SOCKET sock, int controlCode, int param, HWND hwndDlg, std::string controlName) {
+    std::string message = "Z" + std::to_string(controlCode) + ":" + std::to_string(param);//Zxxxxx:x
+    int bytesSent = send(sock, message.c_str(), static_cast<int>(message.size()), 0);
+    if (bytesSent == SOCKET_ERROR) {
+        if (g_console) printf_s("Failed to send CDU control: %d\n", WSAGetLastError());
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Failed to send CDU control: " + std::to_string(WSAGetLastError()) + "\r\n")));
+    }
+    else {
+        if (g_console) printf_s("Sent CDU control: %d:%d\n", controlCode, param);
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sent " + controlName + " " + std::to_string(controlCode) +
+            + ":" + std::to_string(param) + "\r\n")));
+    }
+}
+
 void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
     HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
     if (!grid) {
@@ -185,22 +274,39 @@ void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
         MessageBoxA(hwndDlg, "Grid control not found", "Error", MB_OK | MB_ICONERROR);
         return;
     }
-    std::string displayText;
+    std::string displayText; //Use wchar_t if we need to suport Unicode characters
     for (int i = 0; i < 14; ++i) {
+		char c = ' ';
         for (int j = 0; j < 24; ++j) {
-            char c = (char)package[j][i][0];
-            //if (c == 136) c = 219; //Box
-            //if (c == 173) c = 174; //Switch to <<
-            //if (c == 155) c = 175;
-			//if (c < 32 || c > 126) c = '.'; // Replace non-printable characters with '.'
-            displayText += c;
+            if (package[j][i][0] == -94) {
+                c = '»';  //Right arrow
+                displayText += c;
+            }
+            else if (package[j][i][0] == -95) {
+                c = '«';  //Left arrow
+                displayText += c;
+            }
+            else if (package[j][i][0] == -80) {
+                c = '°'; //Degree symbol
+                displayText += c;
+            }
+            else if (package[j][i][0] == -22) { 
+                c = '¤'; //replaces the box
+                displayText += c;
+            }
+			else {  //No substitution, use the character as is
+                c = (char)package[j][i][0];
+                displayText += c;
+            }
         }
         displayText += "\r\n";
     }
+    
+    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sub: [" + std::to_string(g_package[2][1][0]) + "]\r\n")));
+	//SetDlgItemTextW(hwndDlg, IDC_CDU_GRID, displayText.c_str()); // Set wide string text to grid control
     SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, displayText.c_str());
     InvalidateRect(grid, NULL, TRUE);
     UpdateWindow(grid);
-    if (g_console) printf_s("Grid updated with %zu chars\n", displayText.size());
     PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Grid updated with " + std::to_string(displayText.size()) + " chars\r\n")));
     
 }
@@ -241,19 +347,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             FILE* dummy;
             freopen_s(&dummy, "CONOUT$", "w", stdout);
         }
-        g_hFontGrid = CreateFont(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        g_hFontGrid = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Cascadia Code");
-        if (!g_hFontGrid) {
-            g_hFontGrid = CreateFont(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        /*if (!g_hFontGrid) {
+            g_hFontGrid = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Courier New");
-        }
-        g_hFontDebug = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        }*/
+        g_hFontDebug = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Cascadia Code");
         if (!g_hFontDebug) {
-            g_hFontDebug = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            g_hFontDebug = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Courier New");
         }
@@ -265,6 +371,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         UpdateWindow(GetDlgItem(hwndDlg, IDC_DEBUG_TEXT));
         HWND debugText = GetDlgItem(hwndDlg, IDC_DEBUG_TEXT);
         HWND grid = GetDlgItem(hwndDlg, IDC_CDU_GRID);
+		HWND hGrid = GetDlgItem(hwndDlg, IDC_CDU_GRID); 
+        //SetWindowLongPtr(hGrid, GWLP_WNDPROC, (LONG_PTR)GridWndProc);
         LogDebugMessage(hwndDlg, "Debug text control: " + std::string(debugText ? "Created" : "Not found") + "\r\n");
         LogDebugMessage(hwndDlg, "Grid control: " + std::string(grid ? "Created" : "Not found") + "\r\n");
         SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid\r\n");
@@ -278,6 +386,14 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 if (g_console) printf_s("Failed to create receive thread\n");
                 LogDebugMessage(hwndDlg, "Failed to create receive thread\r\n");
             }
+            // Recreate and reapply the font to the grid control
+            if (!g_hFontGrid) {
+                g_hFontGrid = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Cascadia Code");
+            }
+            SendMessage(GetDlgItem(hwndDlg, IDC_CDU_GRID), WM_SETFONT, (WPARAM)g_hFontGrid, TRUE);
+
         }
         return TRUE;
     }
@@ -306,6 +422,43 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         }
         return TRUE;
     }
+    
+    case WM_CTLCOLORBTN: { // Handle button control colors
+        HDC hdcButton = (HDC)wParam;
+        HWND hwndButton = (HWND)lParam;
+        if (hwndButton == GetDlgItem(hwndDlg, IDC_CDU_BUTTON) ||
+            hwndButton == GetDlgItem(hwndDlg, IDC_DISCONNECT_BUTTON) ||
+            hwndButton == GetDlgItem(hwndDlg, IDC_EXIT_BUTTON)) {
+            SetTextColor(hdcButton, RGB(0, 0, 0)); // Black text
+            SetBkColor(hdcButton, RGB(200, 200, 200)); // Light gray background
+            return (INT_PTR)GetStockObject(LTGRAY_BRUSH);
+        }
+        break;
+    }
+                       // Add this to your DialogProc or main window procedure
+    case WM_DRAWITEM:
+    {
+        LPDRAWITEMSTRUCT lpdis = (LPDRAWITEMSTRUCT)lParam;
+        if (lpdis->CtlID == IDC_STATIC_EXEC_LT3) {
+            // Example: choose color based on a condition
+            COLORREF fillColor = RGB(0, 200, 0); // Default green
+            //if (/* your condition here */) {
+              //  fillColor = RGB(200, 0, 0); // Red if condition met
+           // }
+            HBRUSH hBrush = CreateSolidBrush(fillColor);
+            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+            HGDIOBJ oldPen = SelectObject(lpdis->hDC, hPen);
+            HGDIOBJ oldBrush = SelectObject(lpdis->hDC, hBrush);
+            RoundRect(lpdis->hDC, lpdis->rcItem.left, lpdis->rcItem.top,
+                lpdis->rcItem.right, lpdis->rcItem.bottom, 8, 8);
+            SelectObject(lpdis->hDC, oldBrush);
+            SelectObject(lpdis->hDC, oldPen);
+            DeleteObject(hBrush);
+            DeleteObject(hPen);
+            return TRUE;
+        }
+        break;
+    }
     case WM_DESTROY:
         if (g_hFontGrid) {
             DeleteObject(g_hFontGrid);
@@ -326,7 +479,7 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
             }
             UpdateCDUDisplay(hwndDlg, g_package);
-        }
+        }    
         else if (LOWORD(wParam) == IDC_DISCONNECT_BUTTON) {
             if (g_connected) {
                 g_running = false;
@@ -355,6 +508,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             WSACleanup();
             EndDialog(hwndDlg, 0);
         }
+        else {
+			for (const auto& button : cduButtons) { // Iterate through cdu button commands struct
+                if (LOWORD(wParam) == button.controlId) {
+                    if (g_connected) {
+                        SendCDUControl(g_socket, button.zcode, 1, hwndDlg, button.descrition);
+                    }
+                    else {
+                        MessageBoxA(hwndDlg, "Not connected to server", "Error", MB_OK | MB_ICONERROR);
+                    }
+                    break;
+                }
+            }
+		}
         return TRUE;
     case WM_CLOSE:
         g_running = false;
@@ -371,12 +537,15 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     return FALSE;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
     if (!InitializeWinsock()) {
         MessageBoxA(NULL, "Winsock initialization failed", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
     MessageBoxA(NULL, "Starting client", "Debug", MB_OK);
-    DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);
+    int dlgResult = DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);
+    if (dlgResult == -1) {
+        MessageBoxA(NULL, "DialogBox failed!", "Error", MB_OK | MB_ICONERROR);
+    }
     return 0;
 }
