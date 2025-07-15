@@ -2,21 +2,32 @@
 #include "resource.h"
 #include <sstream>
 #include <algorithm>
+#include <vector>
+#include <tuple>
+#include <cctype>
+
 #include <stdio.h>
 
-SOCKET g_socket = INVALID_SOCKET;
-int g_cduIndex = 0;
+using ParsedMessage = std::tuple<char, char, std::string>; // Parsed message structure
+
+//TCP Socket
+SOCKET g_socket = INVALID_SOCKET; //TCP socket for CDU package
+//UDP Socket variables
+SOCKET g_DataSocket = INVALID_SOCKET; //TCP socket for variable data
+
+int g_DataPort = 46818; // UDP port for receiving CDU data
+
+
+int g_cduIndex = 0;  // Index of the CDU for the Switch CDU button
 int g_package[24][14][3] = { {{0}} };
-HANDLE g_thread = NULL;
+HANDLE g_thread[2]; // Thread handles for the CDU and TCPData processing
+unsigned int g_threadId[2]; // Thread IDs for the CDU and TCPData processing
+
 volatile bool g_running = false;
 HFONT g_hFontGrid = NULL;
 HFONT g_hFontDebug = NULL;
-bool g_console = false; // Console debugging flag -- Turn on for console output
+bool g_console = true; // Console debugging flag -- Turn on for console output
 bool g_connected = false;
-
-//PMDG annunciators
-bool CDU_annunEXEC, CDU_annunDSPY, CDU_annunFAIL, CDU_annunMSG, CDU_annunOFST;//L/R/C CDU annunciators
-bool CDU_annunEXEC_p, CDU_annunDSPY_p, CDU_annunFAIL_p, CDU_annunMSG_p, CDU_annunOFST_p;
 
 // Button command structure
 struct ButtonCommand {
@@ -97,6 +108,12 @@ const ButtonCommand cduButtons[] = {
 	//{IDC_KEY_BRITENESS, 70032, "EVT_CDU_L_BRIGHTNESS"},
 };
 
+bool CDU_annunEXEC[3] = { {0} },
+CDU_annunDSPY[3] = { {0} },
+CDU_annunFAIL[3] = { {0} },
+CDU_annunMSG[3] = { {0} },
+CDU_annunOFST[3] = { {0} };//L/R/C CDU annunciators
+
 bool InitializeWinsock() {
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -108,19 +125,19 @@ bool InitializeWinsock() {
     return true;
 }
 
-bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
-    g_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (g_socket == INVALID_SOCKET) {
+bool ConnectToServer(const char* ip, int port, HWND hwndDlg, SOCKET* pSocket) {
+    *pSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (*pSocket == INVALID_SOCKET) {
         if (g_console) printf_s("Socket creation failed: %d\n", WSAGetLastError());
         MessageBoxA(hwndDlg, ("Socket creation failed: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
     u_long mode = 1;
-    if (ioctlsocket(g_socket, FIONBIO, &mode) != 0) {
+    if (ioctlsocket(*pSocket, FIONBIO, &mode) != 0) {
         if (g_console) printf_s("Failed to set non-blocking mode: %d\n", WSAGetLastError());
         MessageBoxA(hwndDlg, ("Failed to set non-blocking mode: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
-        closesocket(g_socket);
+        closesocket(*pSocket);
         return false;
     }
 
@@ -129,22 +146,22 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     serverAddr.sin_port = htons(port);
     inet_pton(AF_INET, ip, &serverAddr.sin_addr);
 
-    if (connect(g_socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+    if (connect(*pSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         int error = WSAGetLastError();
         if (error != WSAEWOULDBLOCK) {
             if (g_console) printf_s("Connection to %s:%d failed: %d\n", ip, port, error);
             MessageBoxA(hwndDlg, (std::string("Connection to ") + ip + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
-            closesocket(g_socket);
+            closesocket(*pSocket);
             return false;
         }
         fd_set writeSet;
         FD_ZERO(&writeSet);
-        FD_SET(g_socket, &writeSet);
+        FD_SET(*pSocket, &writeSet);
         struct timeval timeout = { 2, 0 };
         if (select(0, NULL, &writeSet, NULL, &timeout) <= 0) {
             if (g_console) printf_s("Connection to %s:%d timed out\n", ip, port);
             MessageBoxA(hwndDlg, "Connection timed out", "Error", MB_OK | MB_ICONERROR);
-            closesocket(g_socket);
+            closesocket(*pSocket);
             return false;
         }
     }
@@ -156,10 +173,90 @@ bool ConnectToServer(const char* ip, int port, HWND hwndDlg) {
     return true;
 }
 
-DWORD WINAPI ReceiveThread(LPVOID lpParam) {
+/*
+bool ConnectToServerUDP(const char* ip, int port, HWND hwndDlg) {
+    g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_udpSocket == INVALID_SOCKET) {
+        if (g_console) printf_s("UDP Socket creation failed: %d\n", WSAGetLastError());
+        MessageBoxA(hwndDlg, ("UDP Socket creation failed: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    // BIND to local port 46818
+    sockaddr_in localAddr = {};
+    localAddr.sin_family = AF_INET;
+    //localAddr.sin_addr.s_addr = htonl(INADDR_ANY); // Listen on all interfaces
+    localAddr.sin_addr.s_addr = htonl(INADDR_ANY); // Listen on all local interfaces
+    localAddr.sin_port = htons(port); 
+
+    if (bind(g_udpSocket, (sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        MessageBoxA(hwndDlg, ("UDP bind failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
+        closesocket(g_udpSocket);
+        return false;
+    }
+	u_long mode = 1; // Set non-blocking mode
+    if (ioctlsocket(g_udpSocket, FIONBIO, &mode) != 0) {
+        if (g_console) printf_s("Failed to set UDP non-blocking mode: %d\n", WSAGetLastError());
+        MessageBoxA(hwndDlg, ("Failed to set UDP non-blocking mode: " + std::to_string(WSAGetLastError())).c_str(), "Error", MB_OK | MB_ICONERROR);
+        closesocket(g_udpSocket);
+        return false;
+	}
+
+    /*g_udpServerAddr.sin_family = AF_INET;
+    g_udpServerAddr.sin_port = htons(port);
+
+    inet_pton(AF_INET, ip, &g_udpServerAddr.sin_addr);
+    if (connect(g_udpSocket, (sockaddr*)&g_udpServerAddr, sizeof(g_udpServerAddr)) == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        if (error != WSAEWOULDBLOCK) {
+            if (g_console) printf_s("UDP connection to %s:%d failed: %d\n", ip, port, error);
+            MessageBoxA(hwndDlg, (std::string("UDP connection to ") + ip + ":" + std::to_string(port) + " failed: " + std::to_string(error)).c_str(), "Error", MB_OK | MB_ICONERROR);
+            closesocket(g_udpSocket);
+            return false;
+        }
+    }
+    if (g_console) printf_s("Connected to UDP server %s:%d\n", ip, port);
+    MessageBoxA(hwndDlg, (std::string("Connected to UDP server ") + ip + ":" + std::to_string(port)).c_str(), "Info", MB_OK);
+	PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Connected to UDP server " + std::string(ip) + ":" + std::to_string(g_udpPort) + "\r\n")));
+    g_connected = true;
+    SetDlgItemTextA(hwndDlg, IDC_DISCONNECT_BUTTON, "Disconnect");
+	return true;
+}
+*/
+
+// Parses all messages in the buffer of the form: <delim><code><value>
+// Example: "#a1", "$b123", etc.
+std::vector<ParsedMessage> ParseDelimitedMessages(const std::string& buffer, const std::string& delimiters = "#$") {
+    std::vector<ParsedMessage> results;
+    size_t i = 0;
+    while (i < buffer.size()) {
+        // Look for a delimiter
+        if (delimiters.find(buffer[i]) != std::string::npos) {
+            char delim = buffer[i];
+            if (i + 1 < buffer.size() && std::isalpha(buffer[i + 1])) {
+                char code = buffer[i + 1];
+                size_t valStart = i + 2;
+                size_t valEnd = valStart;
+                // Read value: digits, letters, or until next delimiter
+                while (valEnd < buffer.size() && delimiters.find(buffer[valEnd]) == std::string::npos) {
+                    valEnd++;
+                }
+                std::string value = buffer.substr(valStart, valEnd - valStart);
+                results.emplace_back(delim, code, value);
+                i = valEnd;
+                continue;
+            }
+        }
+        ++i;
+    }
+    return results;
+}
+
+DWORD WINAPI ReceiveThreadTCPCDU(LPVOID lpParam) {
     HWND hwndDlg = (HWND)lpParam;
     std::string buffer;
     char tempBuffer[4096];
+    //CDU_annunEXEC[0] = 1; //test force the STATIC_LT3 on white
     while (g_running && g_socket != INVALID_SOCKET) {
         int bytesReceived = recv(g_socket, tempBuffer, sizeof(tempBuffer) - 1, 0);
         if (bytesReceived == SOCKET_ERROR) {
@@ -168,8 +265,8 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
                 Sleep(100);
                 continue;
             }
-            if (g_console) printf_s("Receive failed: Error %d\n", error);
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Receive failed: Error " + std::to_string(error) + "\r\n")));
+            if (g_console) printf_s("Receive failed ReceiveThreadTCPCDU: Error %d\n", error);
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Receive failed ReceiveThreadTCPCDU: Error " + std::to_string(error) + "\r\n")));
             break;
         }
         if (bytesReceived == 0) {
@@ -179,65 +276,189 @@ DWORD WINAPI ReceiveThread(LPVOID lpParam) {
         }
         tempBuffer[bytesReceived] = '\0';
         buffer += tempBuffer;
-        if (g_console) printf_s("Received %d bytes, total buffered: %zu\n", bytesReceived, buffer.size());
-        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size()) + "\r\n")));
-        if (g_console) printf_s("Raw data: %.*s\n", (int)std::min<size_t>(100, buffer.size()), buffer.c_str());
-        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size())) + "\r\n")));
-      
+        //if (g_console) printf_s("Received %d bytes, total buffered: %zu\n", bytesReceived, buffer.size());
+        //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size()) + "\r\n")));
+        //if (g_console) printf_s("Raw data: %.*s\n", (int)std::min<size_t>(100, buffer.size()), buffer.c_str());
+        //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size())) + "\r\n")));
+        if (buffer.size() > 2 && buffer[0] == '#' ) {
+			//PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("First two bytes: " + buffer.substr(0, 2) + "\r\n")));
+            //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("First 4 bytes: " + buffer.substr(0, 4) + "\r\n")));
+			
+            switch (buffer[1]) {
+               
+						//CDU data
+                    case 'X': //CDU data
+                        //if (g_console) printf_s("CDU data received, size: %zu bytes\n", buffer.size());
+                        //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("CDU data received, size: " + std::to_string(buffer.size()) + " bytes\r\n")));
+                        if (buffer.size() < 1010) {
+                            if (g_console) printf_s("Insufficient data for text: %zu bytes\n", buffer.size());
+                            //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Insufficient data for text: " + std::to_string(buffer.size()) + " bytes\r\n")));
+                            break;
+                        }
+                        else if (buffer.size() == 1010) {
+                            std::string textData = buffer.substr(2, 1008);
+                            //printf_s("%s\n", textData.c_str());
+                            int idx = 0;
+                            for (int h = 0; h < 3; h++) {
+                                for (int i = 0; i < 14; ++i) {
+                                    for (int j = 0; j < 24; ++j) {
+                                        g_package[j][i][h] = (char)textData[idx];
+                                        if (g_console) {
+                                            //printf_s("%d", g_package[j][i][h]);
+                                        }
+                                        idx++;
+                                    }
+                                    //if (g_console) printf_s("\n");
+                                }
+                            }
+                            //if (g_console) printf_s("CDU data processed, updating display...\n");
+                            //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("CDU data processed, updating display...\r\n")));
+                            UpdateCDUDisplay(hwndDlg, g_package);
+                            buffer.clear(); // Clear the buffer after processing
+                            tempBuffer[0] = '\0'; // Reset tempBuffer to avoid processing old data
+                        }
+						else break; // If the size is not 1010, ignore the data
+                        break;
+                    default:
+						buffer.clear(); // Clear the buffer after processing
+                        if (g_console) printf_s("Unknown command received: %c\n", buffer[1]);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Unknown command received: " + std::string(1, buffer[1]) + "\r\n")));
+						break;
+				} //end switch
+				buffer.erase(0, 2); // Remove the processed command from the buffer
 
-        if (buffer.size() < 1010) {
-            if (g_console) printf_s("Incomplete data received(1010): %zu bytes\n", buffer.size());
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Waiting for more data: " + std::to_string(buffer.size()) + " bytes\r\n")));
-            continue;
+        } else {
+			buffer.clear(); // Clear the buffer if it doesn't start with '#'
+			tempBuffer[0] = '\0'; // Reset tempBuffer to avoid processing old data
+	    }
+    }
+    return 0;
+}
+//Changing UDP to TCP on its own port 46818, for Data
+DWORD WINAPI ReceiveThreadTCPData(LPVOID lpParam) {
+    HWND hwndDlg = (HWND)lpParam;
+    std::string buffer;
+    char tempBuffer[4096];
+	
+    while (g_running && g_DataSocket != INVALID_SOCKET) {
+        int bytesReceived = recv(g_DataSocket, tempBuffer, sizeof(tempBuffer) - 1, 0);
+        if (bytesReceived == SOCKET_ERROR) {
+            int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) {
+                Sleep(100);
+                continue;
+            }
+            if (g_console) printf_s("Receive failed ReceiveThreadTCPData: Error %d\n", error);
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Receive failed ReceiveThreadTCPData: Error " + std::to_string(error) + "\r\n")));
+            break;
         }
-
-        if (buffer.size() >= 2 && buffer[0] == '#' && buffer[1] =='X') {
-            if (g_console) printf_s("Skipped prefix: #%c\n", buffer[1]);
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Skipped prefix: #" + std::string(1, buffer[1]) + "\r\n")));
+        if (bytesReceived == 0) {
+            if (g_console) printf_s("Connection closed by server\n");
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Connection closed by server\r\n")));
+            break;
+        }
+        // Ensure the buffer is null-terminated
+        if (bytesReceived < sizeof(tempBuffer) - 1) {
+            tempBuffer[bytesReceived] = '\0'; // Null-terminate the received data
         }
         else {
-            if (g_console) printf_s("No valid #X prefix found: %.*s\n", (int)std::min<size_t>(10, buffer.size()), buffer.c_str());
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("No valid #X prefix found: " + buffer.substr(0, std::min<size_t>(10, buffer.size())) + "\r\n")));
-            buffer.clear();
-            continue;
+            tempBuffer[sizeof(tempBuffer) - 1] = '\0'; // Ensure null-termination
         }
 
-        //if (buffer[buffer.size() - 1] != '\n') {
-           // if (g_console) printf_s("No trailing newline, waiting for more data\n");
-            //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("No trailing newline, waiting for more data\r\n")));
-            //continue;
-        //}
-
-        if (buffer.size() < 1010) {
-            if (g_console) printf_s("Insufficient data for text: %zu bytes\n", buffer.size());
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Insufficient data for text: " + std::to_string(buffer.size()) + " bytes\r\n")));
-            continue;
-        }
-
-        std::string textData = buffer.substr(2, 1008);
-		//printf_s("%s\n", textData.c_str());
-        int idx = 0; 
-        for (int h = 0; h < 3; h++) {
-            for (int i = 0; i < 14; ++i) {
-                for (int j = 0; j < 24; ++j) {
-                    g_package[j][i][h] = (char)textData[idx];
-                    if (g_console) {
-                        printf_s("%d", g_package[j][i][h]);
-					}       
-                    idx++;
-                }
-                 if (g_console) printf_s("\n");
+        if (g_console) printf_s("TCPData Received %d bytes: %s\n", bytesReceived, buffer);
+        // Parse the received data into messages
+        auto messages = ParseDelimitedMessages(buffer);
+        size_t lastParsedPos = 0;
+        for (const auto& msg : messages) {
+            char delim, code;
+            std::string value;
+            std::tie(delim, code, value) = msg;
+            // Find the position of this message in the buffer
+            size_t pos = buffer.find(delim, lastParsedPos);
+            if (pos != std::string::npos) {
+                lastParsedPos = pos + 2 + value.size(); // delim + code + value
             }
+			//Process the parsed message here
+            if (g_console) printf("Delimiter: %c, Code: %c, Value: %s\n", delim, code, value.c_str());
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Delimiter: " + std::string(1, delim) + ", Code: " + std::string(1, code) + ", Value: " + std::to_string(std::stoi(value)) + "\r\n")));
         }
-        //if (g_console) printf_s("Parsed text bytes\n");
-        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Parsed 336 text bytes\r\n")));
-        if (g_console) printf_s("Sample: [%d]\n", g_package[0][0][0]);
-        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sample: [" + std::to_string(g_package[0][0][0]) + "]\r\n")));
-        buffer.clear();
-        PostMessage(hwndDlg, WM_USER + 1, 0, 0);
+        // Remove processed data from buffer
+        if (lastParsedPos > 0 && lastParsedPos <= buffer.size()) {
+            buffer.erase(0, lastParsedPos);
+        }
+       
+		
+		//Clear the buffer
+		buffer.append(tempBuffer, bytesReceived);
+		
+		// Append the received data to the buffer
+        buffer += tempBuffer;
+        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("TCPData Received " + std::to_string(bytesReceived) + " bytes: " + std::string(buffer) + "\r\n")));
+        buffer[bytesReceived] = '\0';
+        /*
+        if (buffer[0] == '#') {
+			PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received TCPData: " + std::string(buffer) + "\r\n")));
+            HWND hExec = GetDlgItem(hwndDlg, IDC_STATIC_EXEC_LT3);
+            switch (buffer[1]) {
+            case 'a':  //EXEC annunciator CDU0
+                CDU_annunEXEC[0] = (buffer[2] - '0');
+                PostAppMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("EXEC annunciator CDU0: " + std::string(buffer[2] == '1' ? "ON" : "OFF") + "\r\n")));
+                if (hExec) {
+                    InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+                    UpdateWindow(hExec);               // Force immediate redraw
+                }
+                break;
+            case 'b':  //DSPY annunciator CDU0
+                CDU_annunDSPY[0] = (buffer[2] - '0');
+                PostAppMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("DSPY annunciator CDU0: " + std::string(buffer[2] == '1' ? "ON" : "OFF") + "\r\n")));
+                break;
+            case 'c':  //FAIL annunciator CDU0
+                CDU_annunFAIL[0] = (buffer[2] - '0');
+                break;
+            case 'd':  //MSG annunciator CDU0
+                CDU_annunMSG[0] = (buffer[2] - '0');
+                break;
+            case 'e':  //OFST annunciator CDU0
+                CDU_annunOFST[0] = (buffer[2] - '0');
+                break;
+            case 'f': //EXEC annunciator CDU1
+                CDU_annunEXEC[1] = (buffer[2] - '0');
+                break;
+            case 'g': //DSPY annunciator CDU1
+                CDU_annunDSPY[1] = (buffer[2] - '0');
+                break;
+            case 'h': //FAIL annunciator CDU1
+                CDU_annunFAIL[1] = (buffer[2] - '0');
+                break;
+            case 'i': //MSG annunciator CDU1
+                CDU_annunMSG[1] = (buffer[2] - '0');
+                break;
+            case 'j': //OFST annunciator CDU1
+                CDU_annunOFST[1] = (buffer[2] - '0');
+                break;
+            case 'k': //EXEC annunciator CDU2
+                CDU_annunEXEC[2] = (buffer[2] - '0');
+                break;
+            case 'l': //DSPY annunciator CDU2
+                CDU_annunDSPY[2] = (buffer[2] - '0');
+                break;
+            case 'm': //FAIL annunciator CDU2
+                CDU_annunFAIL[2] = (buffer[2] - '0');
+                break;
+            case 'n': //MSG annunciator CDU2
+                CDU_annunMSG[2] = (buffer[2] - '0');
+                break;
+            case 'o': //OFST annunciator CDU2
+                CDU_annunOFST[2] = (buffer[2] - '0');
+                break;
+            }
+            
+        }*/
+        
+        
+     
     }
-    
-    return 0;
+	return 0;
 }
 
 void SendCDUIndex(SOCKET sock, int cduIndex, HWND hwndDlg) {
@@ -302,12 +523,11 @@ void UpdateCDUDisplay(HWND hwndDlg, const int package[24][14][3]) {
         displayText += "\r\n";
     }
     
-    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sub: [" + std::to_string(g_package[2][1][0]) + "]\r\n")));
-	//SetDlgItemTextW(hwndDlg, IDC_CDU_GRID, displayText.c_str()); // Set wide string text to grid control
+    //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sub: [" + std::to_string(g_package[2][1][0]) + "]\r\n")));
     SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, displayText.c_str());
     InvalidateRect(grid, NULL, TRUE);
     UpdateWindow(grid);
-    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Grid updated with " + std::to_string(displayText.size()) + " chars\r\n")));
+    //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Grid updated with " + std::to_string(displayText.size()) + " chars\r\n")));
     
 }
 
@@ -375,17 +595,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         //SetWindowLongPtr(hGrid, GWLP_WNDPROC, (LONG_PTR)GridWndProc);
         LogDebugMessage(hwndDlg, "Debug text control: " + std::string(debugText ? "Created" : "Not found") + "\r\n");
         LogDebugMessage(hwndDlg, "Grid control: " + std::string(grid ? "Created" : "Not found") + "\r\n");
-        SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid\r\n");
+        //SetDlgItemTextA(hwndDlg, IDC_CDU_GRID, "Initial Grid\r\n");
         InvalidateRect(hwndDlg, NULL, TRUE);
         UpdateWindow(hwndDlg);
-        if (ConnectToServer("192.168.1.5", 27016, hwndDlg)) {
+        if (ConnectToServer("192.168.1.5", 27016, hwndDlg, &g_socket)) { //CDU
             SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
             g_running = true;
-            g_thread = CreateThread(NULL, 0, ReceiveThread, hwndDlg, 0, NULL);
-            if (!g_thread) {
+            //g_thread[0] = CreateThread(NULL, 0, &ReceiveThreadTCP, hwndDlg, 0, &g_threadId[0]);
+			g_thread[0] = CreateThread(NULL, 0, ReceiveThreadTCPCDU, hwndDlg, 0, NULL);
+            if (!g_thread[0]) {
                 if (g_console) printf_s("Failed to create receive thread\n");
                 LogDebugMessage(hwndDlg, "Failed to create receive thread\r\n");
             }
+
             // Recreate and reapply the font to the grid control
             if (!g_hFontGrid) {
                 g_hFontGrid = CreateFont(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -394,6 +616,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
             SendMessage(GetDlgItem(hwndDlg, IDC_CDU_GRID), WM_SETFONT, (WPARAM)g_hFontGrid, TRUE);
 
+        }
+        if (ConnectToServer("192.168.1.5", 46818, hwndDlg, &g_DataSocket)) {  //Data
+			g_thread[1] = CreateThread(NULL, 0, ReceiveThreadTCPData, hwndDlg, 0, NULL);
+            if (!g_thread[1]) {
+                if (g_console) printf_s("Failed to create UDP receive thread\n");
+                LogDebugMessage(hwndDlg, "Failed to create UDP receive thread\r\n");
+			}
+            // Optionally send an initial command or data to the TCP server
+			send(g_DataSocket, "CDU Client Init", 15, 0);
+		    
+			//sendto(g_udpSocket, "CDU Client Init", 15, 0, (sockaddr*)&g_udpServerAddr, sizeof(g_udpServerAddr));
+			// SendCDUControl(g_udpSocket, 0, 0, hwndDlg, "Initial UDP Command");
+			LogDebugMessage(hwndDlg, "Connected to UDP server\r\n");
         }
         return TRUE;
     }
@@ -435,16 +670,16 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         }
         break;
     }
-                       // Add this to your DialogProc or main window procedure
+                      
     case WM_DRAWITEM:
     {
         LPDRAWITEMSTRUCT lpdis = (LPDRAWITEMSTRUCT)lParam;
         if (lpdis->CtlID == IDC_STATIC_EXEC_LT3) {
             // Example: choose color based on a condition
-            COLORREF fillColor = RGB(0, 200, 0); // Default green
-            //if (/* your condition here */) {
-              //  fillColor = RGB(200, 0, 0); // Red if condition met
-           // }
+            COLORREF fillColor = RGB(0, 0, 0); // Default background color black
+            if (CDU_annunEXEC[0] == 1) {
+                fillColor = RGB(255, 235, 59); // Yellow if condition met
+            }
             HBRUSH hBrush = CreateSolidBrush(fillColor);
             HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
             HGDIOBJ oldPen = SelectObject(lpdis->hDC, hPen);
@@ -479,20 +714,31 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
             }
             UpdateCDUDisplay(hwndDlg, g_package);
-        }    
+        }
+        if (LOWORD(wParam) == IDC_REFRESH_BUTTON2) {
+           //**Refresh button logic here
+        }
         else if (LOWORD(wParam) == IDC_DISCONNECT_BUTTON) {
             if (g_connected) {
                 g_running = false;
                 DisconnectSocket(hwndDlg);
             }
             else {
-                if (ConnectToServer("192.168.1.5", 27016, hwndDlg)) {
+                if (ConnectToServer("192.168.1.5", 27016, hwndDlg, &g_socket)) { //CDU
                     SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
                     g_running = true;
-                    g_thread = CreateThread(NULL, 0, ReceiveThread, hwndDlg, 0, NULL);
-                    if (!g_thread) {
+                    g_thread[0] = CreateThread(NULL, 0, ReceiveThreadTCPCDU, hwndDlg, 0, NULL);
+                    if (!g_thread[0]) {
                         if (g_console) printf_s("Failed to create receive thread\n");
                         LogDebugMessage(hwndDlg, "Failed to create receive thread\r\n");
+                    }
+                }
+                if (ConnectToServer("192.168.1.5", 46818, hwndDlg, &g_DataSocket)) {
+                    //create a new thread for UDP recv
+                    g_thread[1] = CreateThread(NULL, 0, ReceiveThreadTCPData, hwndDlg, 0, NULL);
+                    if (!g_thread[1]) {
+                        if (g_console) printf_s("Failed to create UDP receive thread\n");
+                        LogDebugMessage(hwndDlg, "Failed to create UDP receive thread\r\n");
                     }
                 }
             }
@@ -500,11 +746,17 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
         else if (LOWORD(wParam) == IDC_EXIT_BUTTON) {
             g_running = false;
             DisconnectSocket(hwndDlg);
-            if (g_thread) {
-                WaitForSingleObject(g_thread, 1000);
-                CloseHandle(g_thread);
-                g_thread = NULL;
+            if (g_thread[0]) {
+                WaitForSingleObject(g_thread[0], 1000);
+                CloseHandle(g_thread[0]);
+                g_thread[0] = NULL;
             }
+            if (g_thread[1]) {
+                WaitForSingleObject(g_thread[1], 1000);
+                CloseHandle(g_thread[1]);
+                g_thread[1] = NULL;
+			}
+			
             WSACleanup();
             EndDialog(hwndDlg, 0);
         }
@@ -525,11 +777,20 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
     case WM_CLOSE:
         g_running = false;
         DisconnectSocket(hwndDlg);
-        if (g_thread) {
-            WaitForSingleObject(g_thread, 1000);
-            CloseHandle(g_thread);
-            g_thread = NULL;
+        if (g_thread[0]) {
+            WaitForSingleObject(g_thread[0], 1000);
+            CloseHandle(g_thread[0]);
+            g_thread[0] = NULL;
         }
+        if (g_thread[1]) {
+            WaitForSingleObject(g_thread[1], 1000);
+            CloseHandle(g_thread[1]);
+            g_thread[1] = NULL;
+        }
+        shutdown(g_socket, SD_BOTH);
+        closesocket(g_socket);
+        shutdown(g_DataSocket, SD_BOTH);
+        closesocket(g_DataSocket);
         WSACleanup();
         EndDialog(hwndDlg, 0);
         return TRUE;
@@ -542,10 +803,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         MessageBoxA(NULL, "Winsock initialization failed", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
-    MessageBoxA(NULL, "Starting client", "Debug", MB_OK);
+    //MessageBoxA(NULL, "Starting client", "Debug", MB_OK);
     int dlgResult = DialogBox(hInstance, MAKEINTRESOURCE(IDD_CDU_DIALOG), NULL, DialogProc);
     if (dlgResult == -1) {
         MessageBoxA(NULL, "DialogBox failed!", "Error", MB_OK | MB_ICONERROR);
     }
+    
     return 0;
 }
