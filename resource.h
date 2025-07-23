@@ -1283,6 +1283,7 @@
 #define IDC_KEY_11                      1016
 #define IDC_KEY_0                       1016
 #define IDC_KEY_PLUS_MINUS              1017
+#define IDC_IPADDRESS1                  1018
 #define CF_GDIOBJLAST                   0x03FF
 #define _WIN32_WINNT_NT4                0x0400
 #define _WIN32_IE_IE40                  0x0400
@@ -1489,6 +1490,12 @@
 #define NEWFILEOPENV3ORD                1553
 #define NEWFORMATDLGWITHLINK            1591
 #define IDC_MANAGE_LINK                 1592
+#define IDC_STATIC_SIMTIME              1600
+#define IDC_STATIC_DIST_TOD             1601
+#define IDC_STATIC_ALTITUDE             1602
+#define IDC_STATIC_BARO                 1603
+#define IDC_STATIC_HEADING              1604
+#define IDC_STATIC_IASMACH              1605
 #define _WIN32_IE_IE70                  0x0700
 #define IDC_CDU_BUTTON                  2000
 #define IDC_DEBUG_TEXT                  2001
@@ -1559,6 +1566,13 @@
 #define IDC_KEY_DEL                     4030
 #define IDC_KEY_SLASH                   4031
 #define IDC_STATIC_EXEC_LT3             4032
+#define IDC_STATIC_DSPY_LT4             4033
+#define IDC_STATIC_FAIL_LT5             4034
+#define IDC_STATIC_MSG_LT6              4035
+#define IDC_STATIC_MSG_LT7              4036
+#define IDC_STATIC_OFST_LT7             4036
+#define IDC_STATIC_EXEC_LT4             4037
+#define IDC_STATIC_PAUSE_LT4            4037
 #define CS_BYTEALIGNCLIENT              0x1000
 #define HDS_OVERFLOW                    0x1000
 #define TBSTYLE_LIST                    0x1000
@@ -1694,7 +1708,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        102
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1007
+#define _APS_NEXT_CONTROL_VALUE         1019
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

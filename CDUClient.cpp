@@ -5,10 +5,10 @@
 #include <vector>
 #include <tuple>
 #include <cctype>
-
 #include <stdio.h>
+#include <CommCtrl.h> // Add this include to define IPM_SETADDRESS
 
-using ParsedMessage = std::tuple<char, char, std::string>; // Parsed message structure
+using ParsedMessage = std::tuple<char, char, int>; // Parsed message structure
 
 //TCP Socket
 SOCKET g_socket = INVALID_SOCKET; //TCP socket for CDU package
@@ -113,6 +113,18 @@ CDU_annunDSPY[3] = { {0} },
 CDU_annunFAIL[3] = { {0} },
 CDU_annunMSG[3] = { {0} },
 CDU_annunOFST[3] = { {0} };//L/R/C CDU annunciators
+
+//data variables for the misc flight data 
+struct SimVars {
+    int simZuluTime; //sc
+	int altitude; //sc
+	int heading; //sc
+    int distanceToTOD; //pmdg
+    int baroMB; //sc
+    int IASMach; //sc
+	bool simPause; //sc
+} g_simVars;;
+
 
 bool InitializeWinsock() {
     WSADATA wsaData;
@@ -224,24 +236,43 @@ bool ConnectToServerUDP(const char* ip, int port, HWND hwndDlg) {
 }
 */
 
+int countDigits(int n) {  // Counts the number of digits in an integer for parsedMessage value
+    if (n == 0) return 1;
+    return static_cast<int>(std::log10(std::abs(n))) + 1;
+}
+
+int ProcessZulu(int zuluTime) {
+    // Convert Zulu time in seconds to HHMMSS format
+    int hours = zuluTime / 3600;
+    int minutes = (zuluTime % 3600) / 60;
+    int seconds = zuluTime % 60;
+    return (hours * 10000) + (minutes * 100) + seconds; // Return as HHMMSS
+}
+
+
 // Parses all messages in the buffer of the form: <delim><code><value>
 // Example: "#a1", "$b123", etc.
 std::vector<ParsedMessage> ParseDelimitedMessages(const std::string& buffer, const std::string& delimiters = "#$") {
     std::vector<ParsedMessage> results;
     size_t i = 0;
     while (i < buffer.size()) {
-        // Look for a delimiter
         if (delimiters.find(buffer[i]) != std::string::npos) {
             char delim = buffer[i];
             if (i + 1 < buffer.size() && std::isalpha(buffer[i + 1])) {
                 char code = buffer[i + 1];
                 size_t valStart = i + 2;
                 size_t valEnd = valStart;
-                // Read value: digits, letters, or until next delimiter
                 while (valEnd < buffer.size() && delimiters.find(buffer[valEnd]) == std::string::npos) {
                     valEnd++;
                 }
-                std::string value = buffer.substr(valStart, valEnd - valStart);
+                std::string valueStr = buffer.substr(valStart, valEnd - valStart);
+                int value = 0;
+                try {
+                    value = std::stoi(valueStr);
+                }
+                catch (...) {
+                    value > 99999; // or handle error as needed
+                }
                 results.emplace_back(delim, code, value);
                 i = valEnd;
                 continue;
@@ -280,6 +311,7 @@ DWORD WINAPI ReceiveThreadTCPCDU(LPVOID lpParam) {
         //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received " + std::to_string(bytesReceived) + " bytes, total buffered: " + std::to_string(buffer.size()) + "\r\n")));
         //if (g_console) printf_s("Raw data: %.*s\n", (int)std::min<size_t>(100, buffer.size()), buffer.c_str());
         //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Raw data: " + buffer.substr(0, std::min<size_t>(100, buffer.size())) + "\r\n")));
+        
         if (buffer.size() > 2 && buffer[0] == '#' ) {
 			//PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("First two bytes: " + buffer.substr(0, 2) + "\r\n")));
             //PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("First 4 bytes: " + buffer.substr(0, 4) + "\r\n")));
@@ -326,7 +358,7 @@ DWORD WINAPI ReceiveThreadTCPCDU(LPVOID lpParam) {
 						break;
 				} //end switch
 				buffer.erase(0, 2); // Remove the processed command from the buffer
-
+        
         } else {
 			buffer.clear(); // Clear the buffer if it doesn't start with '#'
 			tempBuffer[0] = '\0'; // Reset tempBuffer to avoid processing old data
@@ -365,98 +397,232 @@ DWORD WINAPI ReceiveThreadTCPData(LPVOID lpParam) {
             tempBuffer[sizeof(tempBuffer) - 1] = '\0'; // Ensure null-termination
         }
 
-        if (g_console) printf_s("TCPData Received %d bytes: %s\n", bytesReceived, buffer);
+        if (g_console) printf_s("TCPData Received %d bytes: %s\n", bytesReceived, buffer.c_str());
+		// append the received data to the buffer
+        buffer.append(tempBuffer, bytesReceived);
         // Parse the received data into messages
         auto messages = ParseDelimitedMessages(buffer);
         size_t lastParsedPos = 0;
         for (const auto& msg : messages) {
             char delim, code;
-            std::string value;
+            int value;
             std::tie(delim, code, value) = msg;
+            
             // Find the position of this message in the buffer
             size_t pos = buffer.find(delim, lastParsedPos);
+
             if (pos != std::string::npos) {
-                lastParsedPos = pos + 2 + value.size(); // delim + code + value
+				int digits = countDigits(value);
+				if (g_console) printf_s("countDigits: %d\n", digits);
+                lastParsedPos = pos + 2 + digits; // delim + code + value
             }
 			//Process the parsed message here
-            if (g_console) printf("Delimiter: %c, Code: %c, Value: %s\n", delim, code, value.c_str());
-            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Delimiter: " + std::string(1, delim) + ", Code: " + std::string(1, code) + ", Value: " + std::to_string(std::stoi(value)) + "\r\n")));
+            if (delim == '$') {
+                switch (code) {
+                case 'P': // SC Sim Paused?
+                {
+                    g_simVars.simPause = (value != 0);
+                    if (g_console) printf_s("Sim Pause: %s\n", g_simVars.simPause ? "Paused" : "Running");
+                    PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Sim Pause: " + std::string(g_simVars.simPause ? "Paused" : "Running") + "\r\n")));
+                    HWND hPause = GetDlgItem(hwndDlg, IDC_STATIC_PAUSE_LT4);
+                    if (hPause) {
+                        std::string pauseText = g_simVars.simPause ? "Paused" : "Running";
+                        SetDlgItemTextA(hwndDlg, IDC_STATIC_PAUSE_LT4, pauseText.c_str());
+                        InvalidateRect(hPause, NULL, TRUE); // Mark the control for redraw
+                        UpdateWindow(hPause);               // Force immediate redraw
+                    }
+                    break;
+                }
+                }//end switch
+            }
+            if (delim == '#') {
+				HWND hExec = GetDlgItem(hwndDlg, IDC_STATIC_EXEC_LT3);
+                switch (code) {
+                    case 'a':  // EXEC annunciator CDU0
+                        CDU_annunEXEC[0] = value;
+						hExec = GetDlgItem(hwndDlg, IDC_STATIC_EXEC_LT3);
+                        if (hExec) {
+                            InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+                            UpdateWindow(hExec);               // Force immediate redraw
+                        }
+                        break;
+                    case 'b':  // DSPY annunciator CDU0
+                        CDU_annunDSPY[0] = (value);
+						hExec = GetDlgItem(hwndDlg, IDC_STATIC_DSPY_LT4);
+                        if (hExec) {
+                            InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+                            UpdateWindow(hExec);               // Force immediate redraw
+						}
+                        break;
+                    case 'c':  // FAIL annunciator CDU0
+                        CDU_annunFAIL[0] = (value);
+						hExec = GetDlgItem(hwndDlg, IDC_STATIC_FAIL_LT5);
+                        if (hExec) {
+                            InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+							UpdateWindow(hExec);               // Force immediate redraw
+                            }
+                        break;
+                    case 'd':  // MSG annunciator CDU0
+                        CDU_annunMSG[0] = (value);
+						hExec = GetDlgItem(hwndDlg, IDC_STATIC_MSG_LT6);
+                        if (hExec) {
+                            InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+                            UpdateWindow(hExec);               // Force immediate redraw
+						}
+                        break;
+                    case 'e':  // OFST annunciator CDU0
+                        CDU_annunOFST[0] = (value);
+						hExec = GetDlgItem(hwndDlg, IDC_STATIC_OFST_LT7);
+                        if (hExec) {
+                            InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
+                            UpdateWindow(hExec);               // Force immediate redraw
+                        }
+                        break;
+                    case 'f': // EXEC annunciator CDU1
+                        CDU_annunEXEC[1] = (value);
+                        break;
+                    case 'g': // DSPY annunciator CDU1
+                        CDU_annunDSPY[1] = (value);
+                        break;
+                    case 'h': // FAIL annunciator CDU1
+                        CDU_annunFAIL[1] = (value);
+                        break;
+                    case 'i': // MSG annunciator CDU1
+                        CDU_annunMSG[1] = (value);
+                        break;
+                    case 'j': // OFST annunciator CDU1
+                        CDU_annunOFST[1] = (value);
+                        break;
+                    case 'k': // EXEC annunciator CDU2
+                        CDU_annunEXEC[2] = (value);
+                        break;
+                    case 'l': // DSPY annunciator CDU2
+                        CDU_annunDSPY[2] = (value);
+                        break;
+                    case 'm': // FAIL annunciator CDU2
+                        CDU_annunFAIL[2] = (value);
+                        break;
+                    case 'n': // MSG annunciator CDU2
+                        CDU_annunMSG[2] = (value);
+                        break;
+                    case 'o': // OFST annunciator CDU2
+                        CDU_annunOFST[2] = (value);
+                        break;
+                    case 'p': // Sim Zulu Time - sent only once
+                    {
+                        g_simVars.simZuluTime = ProcessZulu(value);
+
+                        if (g_console) printf_s("Zulu Time: %d\n", g_simVars.simZuluTime);
+                        //Format the returned value from HHMMSS to HH:MM and drop the seconds
+                        std::string zuluTimeText = std::to_string(g_simVars.simZuluTime / 10000) + ":" + std::to_string((g_simVars.simZuluTime % 10000) / 100);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Zulu Time: " + zuluTimeText + "\r\n")));
+                        //update IDC_STATIC_SIMTIME
+                        {
+                            HWND hSimTime = GetDlgItem(hwndDlg, IDC_STATIC_SIMTIME);
+                            if (hSimTime) {
+                                std::string simTimeText = "Zulu Time: " + zuluTimeText;
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_SIMTIME, simTimeText.c_str());
+                                InvalidateRect(hSimTime, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hSimTime);               // Force immediate redraw
+                            }
+                        }
+                        break;
+                    }
+                    case 'q': // Sim Altitude
+						g_simVars.altitude = value;
+						if (g_console) printf_s("Altitude: %d\n", g_simVars.altitude);
+						PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Altitude: " + std::to_string(g_simVars.altitude) + "\r\n")));
+						//update IDC_STATIC_ALTITUDE
+                        {
+                            HWND hAltitude = GetDlgItem(hwndDlg, IDC_STATIC_ALTITUDE);
+                            if (hAltitude) {
+                                std::string altitudeText = "Altitude: " + std::to_string(g_simVars.altitude);
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_ALTITUDE, altitudeText.c_str());
+                                InvalidateRect(hAltitude, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hAltitude);               // Force immediate redraw
+                            }
+                        }
+                        break;
+					case 'r': // Sim Heading
+                        g_simVars.heading = value;
+                        if (g_console) printf_s("Heading: %d\n", g_simVars.heading);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Heading: " + std::to_string(g_simVars.heading) + "\r\n")));
+                        //update IDC_STATIC_HEADING
+                        {
+                            HWND hHeading = GetDlgItem(hwndDlg, IDC_STATIC_HEADING);
+                            if (!hHeading) {
+                                printf("IDC_STATIC_HEADING not found!\n");
+                            }
+                            if (hHeading) {
+                                std::string headingText = "Heading: " + std::to_string(g_simVars.heading);
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_HEADING, headingText.c_str());
+                                InvalidateRect(hHeading, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hHeading);               // Force immediate redraw
+                            }
+                        }
+						break;
+                    case 's': // Distance to TOD
+                        g_simVars.distanceToTOD = value;
+                        if (g_console) printf_s("Distance TOD: %d\n", g_simVars.distanceToTOD);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Distance TOD: " + std::to_string(g_simVars.distanceToTOD) + "\r\n")));
+                        //update IDC_STATIC_DISTANCE_TOD
+                        {
+                            HWND hDistanceTOD = GetDlgItem(hwndDlg, IDC_STATIC_DIST_TOD);
+                            if (hDistanceTOD) {
+                                std::string distanceText = "Distance TOD: " + std::to_string(g_simVars.distanceToTOD);
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_DIST_TOD, distanceText.c_str());
+                                InvalidateRect(hDistanceTOD, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hDistanceTOD);               // Force immediate redraw
+                            }
+						}
+                        break;
+                    case 't': // Barometric Pressure in MB
+						g_simVars.baroMB = value;
+                        if (g_console) printf_s("Baro: %d MB\n", g_simVars.baroMB);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Baro: " + std::to_string(g_simVars.baroMB) + " MB\r\n")));
+                        //update IDC_STATIC_BARO
+                        {
+                            HWND hBaro = GetDlgItem(hwndDlg, IDC_STATIC_BARO);
+                            if (hBaro) {
+                                std::string baroText = "Baro: " + std::to_string(g_simVars.baroMB) + " MB";
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_BARO, baroText.c_str());
+                                InvalidateRect(hBaro, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hBaro);               // Force immediate redraw
+                            }
+                        }
+                        break;
+					case 'u': // IAS/Mach
+                        g_simVars.IASMach = value;
+                        if (g_console) printf_s("IAS/Mach: %d\n", g_simVars.IASMach);
+                        PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("IAS/Mach: " + std::to_string(g_simVars.IASMach) + "\r\n")));
+                        //update IDC_STATIC_IASMACH
+                        {
+                            HWND hIASMach = GetDlgItem(hwndDlg, IDC_STATIC_IASMACH);
+                            if (hIASMach) {
+                                std::string iasMachText = "IAS/Mach: " + std::to_string(g_simVars.IASMach);
+                                SetDlgItemTextA(hwndDlg, IDC_STATIC_IASMACH, iasMachText.c_str());
+                                InvalidateRect(hIASMach, NULL, TRUE); // Mark the control for redraw
+                                UpdateWindow(hIASMach);               // Force immediate redraw
+                            }
+                        }
+                        break;
+                    
+                    default:
+                      
+						break;
+				}
+            }
+            if (g_console) printf("Delimiter: %c, Code: %c, Value: %d\n", delim, code, value);
+            PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Delimiter: " + std::string(1, delim) + ", Code: " + std::string(1, code) + ", Value: " + std::to_string(value) + "\r\n")));
         }
         // Remove processed data from buffer
         if (lastParsedPos > 0 && lastParsedPos <= buffer.size()) {
             buffer.erase(0, lastParsedPos);
         }
        
-		
-		//Clear the buffer
-		buffer.append(tempBuffer, bytesReceived);
-		
-		// Append the received data to the buffer
-        buffer += tempBuffer;
         PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("TCPData Received " + std::to_string(bytesReceived) + " bytes: " + std::string(buffer) + "\r\n")));
         buffer[bytesReceived] = '\0';
-        /*
-        if (buffer[0] == '#') {
-			PostMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("Received TCPData: " + std::string(buffer) + "\r\n")));
-            HWND hExec = GetDlgItem(hwndDlg, IDC_STATIC_EXEC_LT3);
-            switch (buffer[1]) {
-            case 'a':  //EXEC annunciator CDU0
-                CDU_annunEXEC[0] = (buffer[2] - '0');
-                PostAppMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("EXEC annunciator CDU0: " + std::string(buffer[2] == '1' ? "ON" : "OFF") + "\r\n")));
-                if (hExec) {
-                    InvalidateRect(hExec, NULL, TRUE); // Mark the control for redraw
-                    UpdateWindow(hExec);               // Force immediate redraw
-                }
-                break;
-            case 'b':  //DSPY annunciator CDU0
-                CDU_annunDSPY[0] = (buffer[2] - '0');
-                PostAppMessage(hwndDlg, WM_USER + 2, 0, (LPARAM)(new std::string("DSPY annunciator CDU0: " + std::string(buffer[2] == '1' ? "ON" : "OFF") + "\r\n")));
-                break;
-            case 'c':  //FAIL annunciator CDU0
-                CDU_annunFAIL[0] = (buffer[2] - '0');
-                break;
-            case 'd':  //MSG annunciator CDU0
-                CDU_annunMSG[0] = (buffer[2] - '0');
-                break;
-            case 'e':  //OFST annunciator CDU0
-                CDU_annunOFST[0] = (buffer[2] - '0');
-                break;
-            case 'f': //EXEC annunciator CDU1
-                CDU_annunEXEC[1] = (buffer[2] - '0');
-                break;
-            case 'g': //DSPY annunciator CDU1
-                CDU_annunDSPY[1] = (buffer[2] - '0');
-                break;
-            case 'h': //FAIL annunciator CDU1
-                CDU_annunFAIL[1] = (buffer[2] - '0');
-                break;
-            case 'i': //MSG annunciator CDU1
-                CDU_annunMSG[1] = (buffer[2] - '0');
-                break;
-            case 'j': //OFST annunciator CDU1
-                CDU_annunOFST[1] = (buffer[2] - '0');
-                break;
-            case 'k': //EXEC annunciator CDU2
-                CDU_annunEXEC[2] = (buffer[2] - '0');
-                break;
-            case 'l': //DSPY annunciator CDU2
-                CDU_annunDSPY[2] = (buffer[2] - '0');
-                break;
-            case 'm': //FAIL annunciator CDU2
-                CDU_annunFAIL[2] = (buffer[2] - '0');
-                break;
-            case 'n': //MSG annunciator CDU2
-                CDU_annunMSG[2] = (buffer[2] - '0');
-                break;
-            case 'o': //OFST annunciator CDU2
-                CDU_annunOFST[2] = (buffer[2] - '0');
-                break;
-            }
-            
-        }*/
         
-        
-     
     }
 	return 0;
 }
@@ -630,9 +796,15 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
 			// SendCDUControl(g_udpSocket, 0, 0, hwndDlg, "Initial UDP Command");
 			LogDebugMessage(hwndDlg, "Connected to UDP server\r\n");
         }
+        HWND hIpAddr = GetDlgItem(hwndDlg, IDC_IPADDRESS1);
+        if (hIpAddr) {
+            SendMessage(hIpAddr, IPM_SETADDRESS, 0, 
+                MAKEIPADDRESS(192,168,1,5));
+        }
         return TRUE;
     }
     case WM_SIZE: {
+           
         int dlgWidth = LOWORD(lParam);
         int dlgHeight = HIWORD(lParam);
         int left = 10, top = 10, right = 10, bottom = 80;
@@ -692,7 +864,194 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             DeleteObject(hPen);
             return TRUE;
         }
-        break;
+        if (lpdis->CtlID == IDC_STATIC_DSPY_LT4) {
+            // Fill background as before
+            COLORREF fillColor = RGB(0, 0, 0);
+            if (CDU_annunDSPY[0] == 1) {
+                fillColor = RGB(255, 0, 0); // Example: red if active
+            }
+            HBRUSH hBrush = CreateSolidBrush(fillColor);
+            FillRect(lpdis->hDC, &lpdis->rcItem, hBrush);
+            DeleteObject(hBrush);
+
+            // Create a vertical font (rotated 90 degrees)
+            LOGFONT lf = {0};
+            lf.lfHeight = 18; // Font height
+            lf.lfEscapement = 900; // 90 degrees
+            lf.lfOrientation = 900;
+            lf.lfWeight = FW_BOLD;
+            strcpy_s(lf.lfFaceName, "Cascadia Code"); // Or your preferred font
+
+            HFONT hFont = CreateFontIndirect(&lf);
+            HFONT hOldFont = (HFONT)SelectObject(lpdis->hDC, hFont);
+
+            SetBkMode(lpdis->hDC, TRANSPARENT);
+            SetTextColor(lpdis->hDC, RGB(255, 255, 255)); // White text
+
+            // The text to display
+            const char* text = "DSPY";
+            // Calculate position (centered)
+            SIZE textSize;
+            GetTextExtentPoint32A(lpdis->hDC, text, (int)strlen(text), &textSize);
+            int x = lpdis->rcItem.left + (lpdis->rcItem.right - lpdis->rcItem.left - textSize.cy) / 2;
+            int y = lpdis->rcItem.top + (lpdis->rcItem.bottom - lpdis->rcItem.top + textSize.cx) / 2;
+
+            TextOutA(lpdis->hDC, x, y, text, (int)strlen(text));
+
+            SelectObject(lpdis->hDC, hOldFont);
+            DeleteObject(hFont);
+
+            return TRUE;
+		}
+        if (lpdis->CtlID == IDC_STATIC_FAIL_LT5) {
+            COLORREF fillColor = RGB(0, 0, 0); // Default background color black
+            if (CDU_annunFAIL[0] == 1) {
+                fillColor = RGB(255, 0, 0); // Red if condition met
+            }
+			HBRUSH hBrush = CreateSolidBrush(fillColor);
+			FillRect(lpdis->hDC, &lpdis->rcItem, hBrush);
+			DeleteObject(hBrush);
+
+            // Create a vertical font (rotated 90 degrees)
+            LOGFONT lf = { 0 };
+            lf.lfHeight = 18; // Font height
+            lf.lfEscapement = 900; // 90 degrees
+            lf.lfOrientation = 900;
+            lf.lfWeight = FW_BOLD;
+            strcpy_s(lf.lfFaceName, "Cascadia Code"); // Or your preferred font
+
+			HFONT hFont = CreateFontIndirect(&lf);
+			HFONT hOldFont = (HFONT)SelectObject(lpdis->hDC, hFont);
+
+			SetBkMode(lpdis->hDC, TRANSPARENT);
+			SetTextColor(lpdis->hDC, RGB(255, 255, 255)); // White text
+			// The text to display
+			const char* text = "FAIL";
+			// Calculate position (centered)
+			SIZE textSize;
+			GetTextExtentPoint32A(lpdis->hDC, text, (int)strlen(text), &textSize);
+			int x = lpdis->rcItem.left + (lpdis->rcItem.right - lpdis->rcItem.left - textSize.cy) / 2;
+			int y = lpdis->rcItem.top + (lpdis->rcItem.bottom - lpdis->rcItem.top + textSize.cx) / 2;
+			TextOutA(lpdis->hDC, x, y, text, (int)strlen(text));
+			SelectObject(lpdis->hDC, hOldFont);
+            DeleteObject(hFont);
+
+            return TRUE;
+		}
+        if (lpdis->CtlID == IDC_STATIC_MSG_LT6) {
+            COLORREF fillColor = RGB(0, 0, 0); // Default background color black
+            if (CDU_annunMSG[0] == 1) {
+                fillColor = RGB(255, 0, 0); // Red if condition met
+            }
+            HBRUSH hBrush = CreateSolidBrush(fillColor);
+            FillRect(lpdis->hDC, &lpdis->rcItem, hBrush);
+            DeleteObject(hBrush);
+
+            // Create a vertical font (rotated 90 degrees)
+            LOGFONT lf = { 0 };
+            lf.lfHeight = 18; // Font height
+            lf.lfEscapement = 900; // 90 degrees
+            lf.lfOrientation = 900;
+            lf.lfWeight = FW_BOLD;
+            strcpy_s(lf.lfFaceName, "Cascadia Code"); // Or your preferred font
+
+            HFONT hFont = CreateFontIndirect(&lf);
+            HFONT hOldFont = (HFONT)SelectObject(lpdis->hDC, hFont);
+
+            SetBkMode(lpdis->hDC, TRANSPARENT);
+            SetTextColor(lpdis->hDC, RGB(255, 255, 255)); // White text
+            // The text to display
+            const char* text = "MSG";
+            // Calculate position (centered)
+            SIZE textSize;
+            GetTextExtentPoint32A(lpdis->hDC, text, (int)strlen(text), &textSize);
+            int x = lpdis->rcItem.left + (lpdis->rcItem.right - lpdis->rcItem.left - textSize.cy) / 2;
+            int y = lpdis->rcItem.top + (lpdis->rcItem.bottom - lpdis->rcItem.top + textSize.cx) / 2;
+            TextOutA(lpdis->hDC, x, y, text, (int)strlen(text));
+            SelectObject(lpdis->hDC, hOldFont);
+            DeleteObject(hFont);
+            return TRUE;
+		}
+        if (lpdis->CtlID == IDC_STATIC_OFST_LT7) {
+            COLORREF fillColor = RGB(0, 0, 0); // Default background color black
+            if (CDU_annunOFST[0] == 1) {
+                fillColor = RGB(255, 0, 0); // Red if condition met
+            }
+            HBRUSH hBrush = CreateSolidBrush(fillColor);
+            FillRect(lpdis->hDC, &lpdis->rcItem, hBrush);
+            DeleteObject(hBrush);
+
+            // Create a vertical font (rotated 90 degrees)
+            LOGFONT lf = { 0 };
+            lf.lfHeight = 18; // Font height
+            lf.lfEscapement = 900; // 90 degrees
+            lf.lfOrientation = 900;
+            lf.lfWeight = FW_BOLD;
+            strcpy_s(lf.lfFaceName, "Cascadia Code"); // Or your preferred font
+
+            HFONT hFont = CreateFontIndirect(&lf);
+            HFONT hOldFont = (HFONT)SelectObject(lpdis->hDC, hFont);
+
+            SetBkMode(lpdis->hDC, TRANSPARENT);
+            SetTextColor(lpdis->hDC, RGB(255, 255, 255)); // White text
+            // The text to display
+            const char* text = "OFST";
+            // Calculate position (centered)
+            SIZE textSize;
+            GetTextExtentPoint32A(lpdis->hDC, text, (int)strlen(text), &textSize);
+            int x = lpdis->rcItem.left + (lpdis->rcItem.right - lpdis->rcItem.left - textSize.cy) / 2;
+            int y = lpdis->rcItem.top + (lpdis->rcItem.bottom - lpdis->rcItem.top + textSize.cx) / 2;
+            TextOutA(lpdis->hDC, x, y, text, (int)strlen(text));
+            SelectObject(lpdis->hDC, hOldFont);
+            DeleteObject(hFont);
+            
+            return TRUE;
+        }
+        if (lpdis->CtlID == IDC_STATIC_PAUSE_LT4) {
+            // Choose color based on pause state
+            COLORREF fillColor = g_simVars.simPause ? RGB(255, 0, 0) : RGB(0, 180, 0); // Red for paused, green for running
+            HBRUSH hBrush = CreateSolidBrush(fillColor);
+            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+            HGDIOBJ oldPen = SelectObject(lpdis->hDC, hPen);
+            HGDIOBJ oldBrush = SelectObject(lpdis->hDC, hBrush);
+
+            // Draw rounded rectangle
+            RoundRect(lpdis->hDC, lpdis->rcItem.left, lpdis->rcItem.top,
+                lpdis->rcItem.right, lpdis->rcItem.bottom, 12, 12);
+
+            // Set up font (12pt)
+            LOGFONT lf = { 0 };
+            lf.lfHeight = -13; // 12pt at 96 DPI
+            lf.lfWeight = FW_BOLD;
+            strcpy_s(lf.lfFaceName, "Cascadia Code");
+            HFONT hFont = CreateFontIndirect(&lf);
+            HFONT hOldFont = (HFONT)SelectObject(lpdis->hDC, hFont);
+
+            // Set text color and background
+            SetBkMode(lpdis->hDC, TRANSPARENT);
+            SetTextColor(lpdis->hDC, RGB(255, 255, 255));
+
+            // Text to display
+            const char* text = g_simVars.simPause ? "PAUSED" : "RUNNING";
+
+            // Center the text
+            SIZE textSize;
+            GetTextExtentPoint32A(lpdis->hDC, text, (int)strlen(text), &textSize);
+            int x = lpdis->rcItem.left + (lpdis->rcItem.right - lpdis->rcItem.left - textSize.cx) / 2;
+            int y = lpdis->rcItem.top + (lpdis->rcItem.bottom - lpdis->rcItem.top - textSize.cy) / 2;
+            TextOutA(lpdis->hDC, x, y, text, (int)strlen(text));
+
+            // Cleanup
+           
+            SelectObject(lpdis->hDC, oldBrush);
+            SelectObject(lpdis->hDC, oldPen);
+            DeleteObject(hFont);
+            DeleteObject(hBrush);
+            DeleteObject(hPen);
+
+            return TRUE;
+
+        }
     }
     case WM_DESTROY:
         if (g_hFontGrid) {
@@ -716,7 +1075,8 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
             UpdateCDUDisplay(hwndDlg, g_package);
         }
         if (LOWORD(wParam) == IDC_REFRESH_BUTTON2) {
-           //**Refresh button logic here
+            //Send TCP command "R" to server
+			send(g_DataSocket, "R\n", 1, 0);
         }
         else if (LOWORD(wParam) == IDC_DISCONNECT_BUTTON) {
             if (g_connected) {
@@ -724,7 +1084,19 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                 DisconnectSocket(hwndDlg);
             }
             else {
-                if (ConnectToServer("192.168.1.5", 27016, hwndDlg, &g_socket)) { //CDU
+                HWND hIpAddr = GetDlgItem(hwndDlg, IDC_IPADDRESS1);
+                DWORD ip;
+                char ipStr[16];
+                if (hIpAddr && SendMessage(hIpAddr, IPM_GETADDRESS, 0, (LPARAM)&ip) == 4) {
+                    sprintf_s(ipStr, "%u.%u.%u.%u",
+                        FIRST_IPADDRESS(ip),
+                        SECOND_IPADDRESS(ip),
+                        THIRD_IPADDRESS(ip),
+                        FOURTH_IPADDRESS(ip));
+                } else {
+                    strcpy_s(ipStr, "192.168.1.5"); // fallback
+                }
+                if (ConnectToServer(ipStr, 27016, hwndDlg, &g_socket)) {
                     SendCDUIndex(g_socket, g_cduIndex, hwndDlg);
                     g_running = true;
                     g_thread[0] = CreateThread(NULL, 0, ReceiveThreadTCPCDU, hwndDlg, 0, NULL);
@@ -732,15 +1104,10 @@ INT_PTR CALLBACK DialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lPara
                         if (g_console) printf_s("Failed to create receive thread\n");
                         LogDebugMessage(hwndDlg, "Failed to create receive thread\r\n");
                     }
+                } else {
+                    MessageBoxA(hwndDlg, "Connection failed.", "Error", MB_OK | MB_ICONERROR);
                 }
-                if (ConnectToServer("192.168.1.5", 46818, hwndDlg, &g_DataSocket)) {
-                    //create a new thread for UDP recv
-                    g_thread[1] = CreateThread(NULL, 0, ReceiveThreadTCPData, hwndDlg, 0, NULL);
-                    if (!g_thread[1]) {
-                        if (g_console) printf_s("Failed to create UDP receive thread\n");
-                        LogDebugMessage(hwndDlg, "Failed to create UDP receive thread\r\n");
-                    }
-                }
+
             }
         }
         else if (LOWORD(wParam) == IDC_EXIT_BUTTON) {
